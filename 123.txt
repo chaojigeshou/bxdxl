@@ -15,7 +15,7 @@ local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 
 -- 核心配置
 local CONFIG = {
-    FLY_HEIGHT = 500,
+    FLY_HEIGHT = 700,
     NORMAL_HEIGHT_OFFSET = 5,
     FLY_SPEED = 90,
     MOVE_TIMEOUT = 20,
@@ -2407,4 +2407,5 @@ print("3. 修复了年份前十草药列表的缩放问题")
 print("4. 修复了优先级草药列表的缩放问题")
 print("5. 优先级寻找逻辑：优先考虑年份（年龄），年份相同再考虑距离")
 print("系统已启动，可在屏幕左上角查看控制界面")
+
 
