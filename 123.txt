@@ -2370,10 +2370,32 @@ player.CharacterAdded:Connect(function(newChar)
     
     stopBreakthroughTimer()
     
-    task.wait(2)
-    if not State.isRunning and State.ControlUI and State.ControlUI:FindFirstChild("MainFrame") then
+    -- 等待1秒后自动启动脚本
+    task.wait(1)
+    
+    if State.ControlUI and State.ControlUI:FindFirstChild("MainFrame") then
         local statusLabel = State.ControlUI.MainFrame.Status
         statusLabel.Text = "状态: 停止 (已重生)"
+        
+        -- 自动启动系统
+        if startSystem() then
+            statusLabel.Text = "状态: 运行中"
+            statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+            
+            local toggleButton = State.ControlUI.MainFrame:FindFirstChild("ToggleButton")
+            if toggleButton then
+                toggleButton.Text = "停止系统"
+                toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+            end
+        else
+            statusLabel.Text = "状态: 启动失败"
+            statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+        end
+    else
+        -- 如果UI不存在，重新创建并启动
+        createControlUI()
+        task.wait(0.5)
+        startSystem()
     end
 end)
 
@@ -2385,3 +2407,4 @@ print("3. 修复了年份前十草药列表的缩放问题")
 print("4. 修复了优先级草药列表的缩放问题")
 print("5. 优先级寻找逻辑：优先考虑年份（年龄），年份相同再考虑距离")
 print("系统已启动，可在屏幕左上角查看控制界面")
+
