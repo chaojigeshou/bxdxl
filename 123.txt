@@ -32,38 +32,38 @@ local CONFIG = {
     BREAKTHROUGH_INTERVAL = 3,      -- 触发Breakthrough的间隔时间（秒）
     ENABLE_BREAKTHROUGH = true,     -- 是否启用Breakthrough功能
     MAX_PRIORITY_HERBS = 5,          -- 最大优先级草药数量
-    SCREEN_SCALE_FACTOR = 0.4,  -- 整体缩放比例（PC端1.0，手机端0.6）
+    SCREEN_SCALE_FACTOR = 0.6,  -- 整体缩放比例（PC端1.0，手机端0.6）
     UI_SCALE = {
         -- 主控制UI尺寸
-        MAIN_FRAME_WIDTH = 400,    -- 原500 * 0.8
-        MAIN_FRAME_HEIGHT = 560,   -- 原700 * 0.8
-        
+        MAIN_FRAME_WIDTH = 300,     -- 原500 * 0.6
+        MAIN_FRAME_HEIGHT = 420,    -- 原700 * 0.6
+
         -- 优先级选择UI尺寸
-        PRIORITY_FRAME_WIDTH = 400,   -- 原500 * 0.8
-        PRIORITY_FRAME_HEIGHT = 480,  -- 原600 * 0.8
-        
+        PRIORITY_FRAME_WIDTH = 300,    -- 原500 * 0.6
+        PRIORITY_FRAME_HEIGHT = 360,   -- 原600 * 0.6
+
         -- 标题文本大小
-        TITLE_TEXT_SIZE = 18,     -- 原20-24 * 0.75
-        SUBTITLE_TEXT_SIZE = 14,  -- 原16-18 * 0.75
-        BODY_TEXT_SIZE = 12,      -- 原14-16 * 0.75
-        SMALL_TEXT_SIZE = 10,     -- 原12-14 * 0.75
-        
+        TITLE_TEXT_SIZE = 15,     -- 原20-24 * 0.6 (取中间值22*0.6≈13.2，建议取14-15)
+        SUBTITLE_TEXT_SIZE = 11,  -- 原16-18 * 0.6 (取17*0.6≈10.2，建议取11)
+        BODY_TEXT_SIZE = 10,      -- 原14-16 * 0.6 (取15*0.6=9，建议取10)
+        SMALL_TEXT_SIZE = 8,      -- 原12-14 * 0.6 (取13*0.6≈7.8，建议取8)
+
         -- 按钮尺寸
-        BUTTON_WIDTH = 170,       -- 原225 * 0.75
-        BUTTON_HEIGHT = 32,       -- 原40 * 0.8
-        BUTTON_TEXT_SIZE = 14,    -- 原16 * 0.875
-        
+        BUTTON_WIDTH = 135,       -- 原225 * 0.6
+        BUTTON_HEIGHT = 24,       -- 原40 * 0.6
+        BUTTON_TEXT_SIZE = 11,    -- 原16 * 0.6≈9.6，建议取10-11
+
         -- 草药条目尺寸
-        HERB_ENTRY_HEIGHT = 24,   -- 原30 * 0.8
-        
+        HERB_ENTRY_HEIGHT = 18,   -- 原30 * 0.6
+
         -- 间距调整
-        PADDING_SMALL = 8,        -- 原10 * 0.8
-        PADDING_MEDIUM = 16,      -- 原20 * 0.8
-        PADDING_LARGE = 24,       -- 原30 * 0.8
-        
+        PADDING_SMALL = 6,        -- 原10 * 0.6
+        PADDING_MEDIUM = 12,      -- 原20 * 0.6
+        PADDING_LARGE = 18,       -- 原30 * 0.6
+
         -- 滚动区域高度
-        SCROLL_AREA_HEIGHT = 320, -- 原400 * 0.8
-        PRIORITY_SCROLL_HEIGHT = 240, -- 原300 * 0.8
+        SCROLL_AREA_HEIGHT = 240,     -- 原400 * 0.6
+        PRIORITY_SCROLL_HEIGHT = 180, -- 原300 * 0.6
     }
 }
 
@@ -2492,4 +2492,5 @@ print("3. 点击Breakthrough开关按钮控制Breakthrough的开启/关闭")
 print("4. 点击'启动系统'按钮启动系统，点击'停止系统'按钮停止系统")
 print("5. 系统会按优先级顺序采摘草药，未选择优先级则采集所有草药")
 print("UI已创建，可在屏幕左上角查看")
+
 
