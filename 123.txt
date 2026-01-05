@@ -659,6 +659,7 @@ local function findBestHerb()
     return nil
 end
 
+-- 修复：移除对herb.priority的直接访问，改用存储的优先级信息
 local function findAlternativeHerb(excludeHerb)
     print("[寻找] 正在寻找替代草药...")
     local allHerbs = scanHerbs()
@@ -669,44 +670,48 @@ local function findAlternativeHerb(excludeHerb)
 
     local priorityHerbs, nonPriorityHerbs, hasPriority = filterHerbsByPriority(allHerbs)
     
-    local herbsToCheck = {}
-    
-    if #priorityHerbs > 0 then
-        for _, priorityInfo in ipairs(priorityHerbs) do
-            if priorityInfo.herb ~= excludeHerb then
-                table.insert(herbsToCheck, {
-                    herb = priorityInfo.herb,
-                    priority = priorityInfo.priority,
-                    isPriority = true
-                })
-            end
-        end
-    end
-    
-    if #herbsToCheck == 0 and #nonPriorityHerbs > 0 then
-        for _, herb in ipairs(nonPriorityHerbs) do
-            if herb ~= excludeHerb then
-                table.insert(herbsToCheck, {
-                    herb = herb,
-                    isPriority = false
-                })
-            end
-        end
-    end
-    
-    if #herbsToCheck == 0 then
-        print("[寻找] 没有其他可用的替代草药")
-        return nil
-    end
-    
-    -- 收集所有替代草药的信息
+    -- 收集所有替代草药信息
     local herbInfoList = {}
     local currentPos = excludeHerb and excludeHerb.Position or humanoidRootPart.Position
     
-    for _, herbInfo in ipairs(herbsToCheck) do
-        local herb = herbInfo.herb
-        
-        if herb and herb.Parent and herb:IsDescendantOf(Workspace) then
+    -- 添加优先级草药
+    if hasPriority and #priorityHerbs > 0 then
+        for _, priorityInfo in ipairs(priorityHerbs) do
+            local herb = priorityInfo.herb
+            local priority = priorityInfo.priority
+            
+            if herb and herb ~= excludeHerb and herb.Parent and herb:IsDescendantOf(Workspace) then
+                -- 检查是否超时
+                local isTimedOut = false
+                for timeoutHerb, timeoutTime in pairs(State.timeoutHerbs) do
+                    if timeoutHerb and timeoutHerb == herb then
+                        if tick() - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
+                            isTimedOut = true
+                        end
+                        break
+                    end
+                end
+                
+                if not isTimedOut then
+                    local age = getHerbAge(herb)
+                    local distance = (herb.Position - currentPos).Magnitude
+                    
+                    table.insert(herbInfoList, {
+                        herb = herb,
+                        age = age,
+                        distance = distance,
+                        isPriority = true,
+                        priority = priority
+                    })
+                end
+            end
+        end
+    end
+    
+    -- 添加非优先级草药
+    for _, herb in ipairs(nonPriorityHerbs) do
+        if herb and herb ~= excludeHerb and herb.Parent and herb:IsDescendantOf(Workspace) then
+            -- 检查是否超时
             local isTimedOut = false
             for timeoutHerb, timeoutTime in pairs(State.timeoutHerbs) do
                 if timeoutHerb and timeoutHerb == herb then
@@ -725,38 +730,39 @@ local function findAlternativeHerb(excludeHerb)
                     herb = herb,
                     age = age,
                     distance = distance,
-                    isPriority = herbInfo.isPriority,
-                    priority = herbInfo.priority
+                    isPriority = false
                 })
             end
         end
     end
-
+    
     if #herbInfoList == 0 then
         print("[寻找] 没有其他可用的替代草药")
         return nil
     end
     
-    -- 按优先级和年份排序
+    -- 按年份和优先级排序
     table.sort(herbInfoList, function(a, b)
-        -- 都是优先级草药，按年份从大到小排序
+        -- 都是优先级草药
         if a.isPriority and b.isPriority then
-            if a.age ~= b.age then
+            if a.priority ~= b.priority then
+                return a.priority < b.priority  -- 优先级数字小的优先
+            elseif a.age ~= b.age then
                 return a.age > b.age  -- 年份大的优先
             else
-                return a.distance < b.distance  -- 年份相同，距离近的优先
+                return a.distance < b.distance  -- 距离近的优先
             end
         -- 一个优先级一个非优先级，优先级优先
         elseif a.isPriority and not b.isPriority then
             return true
         elseif not a.isPriority and b.isPriority then
             return false
-        -- 都是非优先级草药，按年份从大到小排序
+        -- 都是非优先级草药，按年份排序
         else
             if a.age ~= b.age then
                 return a.age > b.age  -- 年份大的优先
             else
-                return a.distance < b.distance  -- 年份相同，距离近的优先
+                return a.distance < b.distance  -- 距离近的优先
             end
         end
     end)
@@ -1016,10 +1022,20 @@ local function createHerbEntry(parent, index, herbInfo)
         entryFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 80)       -- 深灰色：非优先级
     end
     
+    -- 使用表格布局确保对齐
+    local layout = Instance.new("UIListLayout")
+    layout.FillDirection = Enum.FillDirection.Horizontal
+    layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+    layout.VerticalAlignment = Enum.VerticalAlignment.Center
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Padding = UDim.new(0, 2)
+    layout.Parent = entryFrame
+    
+    -- 排名标签
     local rankLabel = Instance.new("TextLabel")
     rankLabel.Name = "Rank"
-    rankLabel.Size = UDim2.new(0.15, 0, 1, 0)
-    rankLabel.Position = UDim2.new(0, 0, 0, 0)
+    rankLabel.Size = UDim2.new(0.12, 0, 1, 0)
+    rankLabel.LayoutOrder = 1
     rankLabel.BackgroundTransparency = 1
     rankLabel.Text = "#" .. index
     rankLabel.TextColor3 = isPriority and Color3.fromRGB(255, 255, 100) or Color3.fromRGB(255, 215, 0)
@@ -1027,44 +1043,36 @@ local function createHerbEntry(parent, index, herbInfo)
     rankLabel.TextSize = UI.SMALL_TEXT_SIZE
     rankLabel.TextXAlignment = Enum.TextXAlignment.Center
     
+    -- 名称标签
     local nameLabel = Instance.new("TextLabel")
     nameLabel.Name = "Name"
-    nameLabel.Size = UDim2.new(0.35, 0, 1, 0)
-    nameLabel.Position = UDim2.new(0.15, 0, 0, 0)
+    nameLabel.Size = UDim2.new(0.36, 0, 1, 0)
+    nameLabel.LayoutOrder = 2
     nameLabel.BackgroundTransparency = 1
-    
-    -- 如果草药名太长，截断
-    local displayName = herbInfo.name
-    if string.len(displayName) > 6 then
-        displayName = string.sub(displayName, 1, 6) .. "..."
-    end
-    
-    -- 如果是优先级草药，添加优先级标记
-    if isPriority then
-        displayName = displayName .. " (P" .. priorityNum .. ")"
-    end
-    
-    nameLabel.Text = displayName
+    nameLabel.Text = herbInfo.name
     nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
     nameLabel.Font = Enum.Font.SourceSans
     nameLabel.TextSize = UI.SMALL_TEXT_SIZE
     nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    nameLabel.TextTruncate = Enum.TextTruncate.AtEnd  -- 过长时截断
     
+    -- 年份标签
     local ageLabel = Instance.new("TextLabel")
     ageLabel.Name = "Age"
-    ageLabel.Size = UDim2.new(0.25, 0, 1, 0)
-    ageLabel.Position = UDim2.new(0.5, 0, 0, 0)
+    ageLabel.Size = UDim2.new(0.22, 0, 1, 0)
+    ageLabel.LayoutOrder = 3
     ageLabel.BackgroundTransparency = 1
-    ageLabel.Text = herbInfo.age
+    ageLabel.Text = tostring(herbInfo.age)
     ageLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
     ageLabel.Font = Enum.Font.SourceSansBold
     ageLabel.TextSize = UI.SMALL_TEXT_SIZE
     ageLabel.TextXAlignment = Enum.TextXAlignment.Center
     
+    -- 距离标签
     local distanceLabel = Instance.new("TextLabel")
     distanceLabel.Name = "Distance"
-    distanceLabel.Size = UDim2.new(0.25, 0, 1, 0)
-    distanceLabel.Position = UDim2.new(0.75, 0, 0, 0)
+    distanceLabel.Size = UDim2.new(0.28, 0, 1, 0)
+    distanceLabel.LayoutOrder = 4
     distanceLabel.BackgroundTransparency = 1
     distanceLabel.Text = string.format("%.0fm", herbInfo.distance)
     distanceLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
@@ -1186,6 +1194,8 @@ local function updateTopHerbsList()
     return State.topHerbsList
 end
 
+-- ===================== 更新年份前十草药UI（修复排版） =====================
+
 local function updateTopHerbsUI()
     if not State.ControlUI or not State.ControlUI:FindFirstChild("MainFrame") then
         return
@@ -1219,7 +1229,7 @@ local function updateTopHerbsUI()
         createHerbEntry(scrollFrame, i, herbInfo)
     end
     
-    -- 更新滚动区域大小（修复缩放问题）
+    -- 更新滚动区域大小
     scrollFrame.CanvasSize = UDim2.new(0, 0, 0, #State.topHerbsList * CONFIG.UI_SCALE.HERB_ENTRY_HEIGHT)
     
     -- 更新计数
@@ -1229,7 +1239,7 @@ local function updateTopHerbsUI()
     end
 end
 
--- ===================== 主循环 =====================
+-- ===================== 主循环（修复超时后不前往下一个草药的问题） =====================
 local function mainLoop()
     print("[主流程] 启动，开始寻找草药...")
     print("[主流程] 最大重试次数：" .. CONFIG.MAX_RETRY_ATTEMPTS)
@@ -1344,19 +1354,23 @@ local function mainLoop()
                 print("[主流程] 达到最大超时次数（" .. CONFIG.MAX_RETRY_ATTEMPTS .. "），寻找替代草药...")
             end
             
+            -- 修复：确保在超时后寻找替代草药
             local alternativeHerb = findAlternativeHerb(State.currentHerb)
             if alternativeHerb then
                 print("[主流程] 切换到替代草药：" .. alternativeHerb.Name)
                 State.currentHerb = alternativeHerb
                 
                 if State.isRunning then
+                    -- 修复：立即前往替代草药，而不是等待
+                    print("[主流程] 立即前往替代草药...")
                     ascendToFlyHeight()
                 end
-                task.wait(1)
+                -- 修复：不等待，立即进入下一次循环前往替代草药
                 continue
             else
                 print("[主流程] 未找到替代草药")
                 
+                -- 检查是否应该重生
                 if State.currentTimeoutCount >= CONFIG.MAX_RETRY_ATTEMPTS then
                     print("[主流程] 连续超时次数过多，执行重生")
                     
@@ -1504,6 +1518,7 @@ local function createPrioritySelectionUI()
     mainFrame.Active = true
     mainFrame.Draggable = true
     
+    -- 标题
     local titleLabel = Instance.new("TextLabel")
     titleLabel.Name = "Title"
     titleLabel.Size = UDim2.new(1, 0, 0, 40)
@@ -1515,6 +1530,7 @@ local function createPrioritySelectionUI()
     titleLabel.TextSize = UI.TITLE_TEXT_SIZE
     titleLabel.BorderSizePixel = 0
     
+    -- 说明
     local instructionLabel = Instance.new("TextLabel")
     instructionLabel.Name = "Instruction"
     instructionLabel.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 60)
@@ -1527,6 +1543,7 @@ local function createPrioritySelectionUI()
     instructionLabel.TextWrapped = true
     instructionLabel.TextXAlignment = Enum.TextXAlignment.Left
     
+    -- 选择数量显示
     local selectionLabel = Instance.new("TextLabel")
     selectionLabel.Name = "SelectionLabel"
     selectionLabel.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 25)
@@ -1538,9 +1555,10 @@ local function createPrioritySelectionUI()
     selectionLabel.TextSize = UI.BODY_TEXT_SIZE
     selectionLabel.TextXAlignment = Enum.TextXAlignment.Left
     
+    -- 优先级列表
     local priorityFrame = Instance.new("Frame")
     priorityFrame.Name = "PriorityFrame"
-    priorityFrame.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 80)
+    priorityFrame.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 100)
     priorityFrame.Position = UDim2.new(0, UI.PADDING_SMALL, 0, 140)
     priorityFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
     priorityFrame.BorderSizePixel = 0
@@ -1562,13 +1580,14 @@ local function createPrioritySelectionUI()
     priorityScroll.Position = UDim2.new(0, 0, 0, 25)
     priorityScroll.BackgroundTransparency = 1
     priorityScroll.BorderSizePixel = 0
-    priorityScroll.ScrollBarThickness = 4
+    priorityScroll.ScrollBarThickness = 6
     priorityScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
     
+    -- 草药列表
     local herbsFrame = Instance.new("Frame")
     herbsFrame.Name = "HerbsFrame"
     herbsFrame.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, UI.PRIORITY_SCROLL_HEIGHT)
-    herbsFrame.Position = UDim2.new(0, UI.PADDING_SMALL, 0, 225)
+    herbsFrame.Position = UDim2.new(0, UI.PADDING_SMALL, 0, 245)
     herbsFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
     herbsFrame.BorderSizePixel = 0
     
@@ -1589,9 +1608,10 @@ local function createPrioritySelectionUI()
     herbsScroll.Position = UDim2.new(0, 0, 0, 25)
     herbsScroll.BackgroundTransparency = 1
     herbsScroll.BorderSizePixel = 0
-    herbsScroll.ScrollBarThickness = 4
+    herbsScroll.ScrollBarThickness = 6
     herbsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
     
+    -- 按钮区域
     local buttonFrame = Instance.new("Frame")
     buttonFrame.Name = "ButtonFrame"
     buttonFrame.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 50)
@@ -1599,6 +1619,7 @@ local function createPrioritySelectionUI()
     buttonFrame.BackgroundTransparency = 1
     buttonFrame.BorderSizePixel = 0
     
+    -- 按钮
     local confirmButton = Instance.new("TextButton")
     confirmButton.Name = "ConfirmButton"
     confirmButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
@@ -1646,6 +1667,88 @@ local function createPrioritySelectionUI()
         end
     end
     
+    local function createPriorityItem(index, herbName)
+        local itemFrame = Instance.new("Frame")
+        itemFrame.Name = "PriorityItem_" .. index
+        itemFrame.Size = UDim2.new(1, -10, 0, 32)
+        itemFrame.Position = UDim2.new(0, 5, 0, (index-1) * 32)
+        itemFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 90)
+        itemFrame.BorderSizePixel = 0
+        
+        local layout = Instance.new("UIListLayout")
+        layout.FillDirection = Enum.FillDirection.Horizontal
+        layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+        layout.VerticalAlignment = Enum.VerticalAlignment.Center
+        layout.SortOrder = Enum.SortOrder.LayoutOrder
+        layout.Padding = UDim.new(0, 5)
+        layout.Parent = itemFrame
+        
+        local priorityLabel = Instance.new("TextLabel")
+        priorityLabel.Name = "Priority"
+        priorityLabel.Size = UDim2.new(0, 35, 1, 0)
+        priorityLabel.LayoutOrder = 1
+        priorityLabel.BackgroundTransparency = 1
+        priorityLabel.Text = "#" .. index
+        priorityLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
+        priorityLabel.Font = Enum.Font.SourceSansBold
+        priorityLabel.TextSize = 14
+        priorityLabel.TextXAlignment = Enum.TextXAlignment.Center
+        
+        local nameLabel = Instance.new("TextLabel")
+        nameLabel.Name = "Name"
+        nameLabel.Size = UDim2.new(0.6, -40, 1, 0)
+        nameLabel.LayoutOrder = 2
+        nameLabel.BackgroundTransparency = 1
+        nameLabel.Text = herbName
+        nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+        nameLabel.Font = Enum.Font.SourceSans
+        nameLabel.TextSize = 14
+        nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+        nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+        
+        local removeButton = Instance.new("TextButton")
+        removeButton.Name = "RemoveButton"
+        removeButton.Size = UDim2.new(0.3, 0, 0.7, 0)
+        removeButton.LayoutOrder = 3
+        removeButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        removeButton.Text = "移除"
+        removeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        removeButton.Font = Enum.Font.SourceSans
+        removeButton.TextSize = 12
+        removeButton.BorderSizePixel = 0
+        
+        removeButton.MouseButton1Click:Connect(function()
+            for idx, name in ipairs(selectedHerbs) do
+                if name == herbName then
+                    table.remove(selectedHerbs, idx)
+                    selectedCount = selectedCount - 1
+                    break
+                end
+            end
+            
+            -- 重新创建优先级列表
+            for _, child in ipairs(priorityScroll:GetChildren()) do
+                if child:IsA("Frame") and child.Name:match("^PriorityItem_") then
+                    child:Destroy()
+                end
+            end
+            
+            for i, name in ipairs(selectedHerbs) do
+                createPriorityItem(i, name)
+            end
+            
+            updateSelectionDisplay()
+            print("[优先级] 已移除草药: " .. herbName)
+        end)
+        
+        priorityLabel.Parent = itemFrame
+        nameLabel.Parent = itemFrame
+        removeButton.Parent = itemFrame
+        itemFrame.Parent = priorityScroll
+        
+        return itemFrame
+    end
+    
     local function updatePriorityList()
         for _, child in ipairs(priorityScroll:GetChildren()) do
             if child:IsA("Frame") and child.Name:match("^PriorityItem_") then
@@ -1654,70 +1757,14 @@ local function createPrioritySelectionUI()
         end
         
         for i, herbName in ipairs(selectedHerbs) do
-            local itemFrame = Instance.new("Frame")
-            itemFrame.Name = "PriorityItem_" .. i
-            itemFrame.Size = UDim2.new(1, -10, 0, 30)
-            itemFrame.Position = UDim2.new(0, 5, 0, (i-1) * 30)
-            itemFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 90)
-            itemFrame.BorderSizePixel = 0
-            
-            local priorityLabel = Instance.new("TextLabel")
-            priorityLabel.Name = "Priority"
-            priorityLabel.Size = UDim2.new(0, 30, 1, 0)
-            priorityLabel.Position = UDim2.new(0, 0, 0, 0)
-            priorityLabel.BackgroundTransparency = 1
-            priorityLabel.Text = "#" .. i
-            priorityLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
-            priorityLabel.Font = Enum.Font.SourceSansBold
-            priorityLabel.TextSize = 14
-            priorityLabel.TextXAlignment = Enum.TextXAlignment.Center
-            
-            local nameLabel = Instance.new("TextLabel")
-            nameLabel.Name = "Name"
-            nameLabel.Size = UDim2.new(0.6, -40, 1, 0)
-            nameLabel.Position = UDim2.new(0, 35, 0, 0)
-            nameLabel.BackgroundTransparency = 1
-            nameLabel.Text = herbName
-            nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-            nameLabel.Font = Enum.Font.SourceSans
-            nameLabel.TextSize = 14
-            nameLabel.TextXAlignment = Enum.TextXAlignment.Left
-            
-            local removeButton = Instance.new("TextButton")
-            removeButton.Name = "RemoveButton"
-            removeButton.Size = UDim2.new(0.4, 0, 0.7, 0)
-            removeButton.Position = UDim2.new(0.6, 5, 0.15, 0)
-            removeButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-            removeButton.Text = "移除"
-            removeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-            removeButton.Font = Enum.Font.SourceSans
-            removeButton.TextSize = 12
-            removeButton.BorderSizePixel = 0
-            
-            removeButton.MouseButton1Click:Connect(function()
-                for idx, name in ipairs(selectedHerbs) do
-                    if name == herbName then
-                        table.remove(selectedHerbs, idx)
-                        selectedCount = selectedCount - 1
-                        break
-                    end
-                end
-                
-                updatePriorityList()
-                updateSelectionDisplay()
-                print("[优先级] 已移除草药: " .. herbName)
-            end)
-            
-            priorityLabel.Parent = itemFrame
-            nameLabel.Parent = itemFrame
-            removeButton.Parent = itemFrame
-            itemFrame.Parent = priorityScroll
+            createPriorityItem(i, herbName)
         end
         
-        -- 更新滚动区域大小（修复缩放问题）
-        priorityScroll.CanvasSize = UDim2.new(0, 0, 0, #selectedHerbs * 30)
+        -- 更新滚动区域大小
+        priorityScroll.CanvasSize = UDim2.new(0, 0, 0, #selectedHerbs * 32)
     end
     
+    -- 加载草药列表
     local herbsList = loadHerbTypesFromReplicatedStorage()
     
     for i, herbName in ipairs(herbsList) do
@@ -1728,10 +1775,18 @@ local function createPrioritySelectionUI()
         itemFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
         itemFrame.BorderSizePixel = 0
         
+        local layout = Instance.new("UIListLayout")
+        layout.FillDirection = Enum.FillDirection.Horizontal
+        layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+        layout.VerticalAlignment = Enum.VerticalAlignment.Center
+        layout.SortOrder = Enum.SortOrder.LayoutOrder
+        layout.Padding = UDim.new(0, 8)
+        layout.Parent = itemFrame
+        
         local checkbox = Instance.new("TextButton")
         checkbox.Name = "Checkbox"
         checkbox.Size = UDim2.new(0, 30, 0, 30)
-        checkbox.Position = UDim2.new(0, 5, 0.125, 0)
+        checkbox.LayoutOrder = 1
         checkbox.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
         checkbox.Text = ""
         checkbox.BorderSizePixel = 0
@@ -1749,8 +1804,8 @@ local function createPrioritySelectionUI()
         
         local nameLabel = Instance.new("TextLabel")
         nameLabel.Name = "Name"
-        nameLabel.Size = UDim2.new(1, -40, 1, 0)
-        nameLabel.Position = UDim2.new(0, 40, 0, 0)
+        nameLabel.Size = UDim2.new(0.8, -40, 1, 0)
+        nameLabel.LayoutOrder = 2
         nameLabel.BackgroundTransparency = 1
         nameLabel.Text = herbName
         nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -1759,6 +1814,20 @@ local function createPrioritySelectionUI()
         nameLabel.TextXAlignment = Enum.TextXAlignment.Left
         
         local isSelected = false
+        
+        -- 检查是否已经选择
+        for _, priorityHerb in ipairs(State.priorityHerbs) do
+            if priorityHerb.name == herbName then
+                isSelected = true
+                checkmark.Visible = true
+                checkbox.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+                
+                table.insert(selectedHerbs, herbName)
+                selectedCount = selectedCount + 1
+                break
+            end
+        end
+        
         checkbox.MouseButton1Click:Connect(function()
             if isSelected then
                 isSelected = false
@@ -1794,27 +1863,16 @@ local function createPrioritySelectionUI()
             updateSelectionDisplay()
         end)
         
-        for _, priorityHerb in ipairs(State.priorityHerbs) do
-            if priorityHerb.name == herbName then
-                isSelected = true
-                checkmark.Visible = true
-                checkbox.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
-                
-                table.insert(selectedHerbs, herbName)
-                selectedCount = selectedCount + 1
-                break
-            end
-        end
-        
         checkmark.Parent = checkbox
         checkbox.Parent = itemFrame
         nameLabel.Parent = itemFrame
         itemFrame.Parent = herbsScroll
     end
     
-    -- 更新滚动区域大小（修复缩放问题）
+    -- 更新滚动区域大小
     herbsScroll.CanvasSize = UDim2.new(0, 0, 0, #herbsList * 40)
     
+    -- 按钮事件
     confirmButton.MouseButton1Click:Connect(function()
         State.priorityHerbs = {}
         
@@ -1881,6 +1939,7 @@ local function createPrioritySelectionUI()
     updatePriorityList()
     updateSelectionDisplay()
     
+    -- 组装UI
     priorityTitle.Parent = priorityFrame
     priorityScroll.Parent = priorityFrame
     herbsTitle.Parent = herbsFrame
@@ -1891,10 +1950,12 @@ local function createPrioritySelectionUI()
     selectionLabel.Parent = mainFrame
     priorityFrame.Parent = mainFrame
     herbsFrame.Parent = mainFrame
+    
     confirmButton.Parent = buttonFrame
     cancelButton.Parent = buttonFrame
     clearButton.Parent = buttonFrame
     buttonFrame.Parent = mainFrame
+    
     mainFrame.Parent = screenGui
     screenGui.Parent = player:WaitForChild("PlayerGui")
     
@@ -2069,7 +2130,7 @@ local function createControlUI()
     scrollFrame.Position = UDim2.new(0, 0, 0, 48)
     scrollFrame.BackgroundTransparency = 1
     scrollFrame.BorderSizePixel = 0
-    scrollFrame.ScrollBarThickness = 4
+    scrollFrame.ScrollBarThickness = 6
     scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
     
     local headerFrame = Instance.new("Frame")
@@ -2079,23 +2140,34 @@ local function createControlUI()
     headerFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
     headerFrame.BorderSizePixel = 0
     
-    local headers = {"排名", "名称", "年份", "距离"}
-    local headerWidths = {0.15, 0.35, 0.25, 0.25}  -- 调整宽度以匹配createHerbEntry中的设置
+    -- 使用表格布局确保标题对齐
+    local headerLayout = Instance.new("UIListLayout")
+    headerLayout.FillDirection = Enum.FillDirection.Horizontal
+    headerLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+    headerLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    headerLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    headerLayout.Padding = UDim.new(0, 2)
+    headerLayout.Parent = headerFrame
     
-    for i, headerText in ipairs(headers) do
+    -- 创建标题（与createHerbEntry中的宽度比例一致）
+    local headers = {
+        {text = "排名", width = 0.12, alignment = Enum.TextXAlignment.Center},
+        {text = "名称", width = 0.36, alignment = Enum.TextXAlignment.Left},
+        {text = "年份", width = 0.22, alignment = Enum.TextXAlignment.Center},
+        {text = "距离", width = 0.28, alignment = Enum.TextXAlignment.Right}
+    }
+    
+    for i, header in ipairs(headers) do
         local headerLabel = Instance.new("TextLabel")
         headerLabel.Name = "Header" .. i
-        headerLabel.Size = UDim2.new(headerWidths[i], 0, 1, 0)
-        headerLabel.Position = UDim2.new(i > 1 and headerWidths[1] or 0, 0, 0, 0)
-        for j = 2, i-1 do
-            headerLabel.Position = headerLabel.Position + UDim2.new(headerWidths[j], 0, 0, 0)
-        end
+        headerLabel.Size = UDim2.new(header.width, 0, 1, 0)
+        headerLabel.LayoutOrder = i
         headerLabel.BackgroundTransparency = 1
-        headerLabel.Text = headerText
+        headerLabel.Text = header.text
         headerLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
         headerLabel.Font = Enum.Font.SourceSansBold
-        headerLabel.TextSize = UI.SMALL_TEXT_SIZE  -- 使用缩放后的字体大小
-        headerLabel.TextXAlignment = Enum.TextXAlignment.Center
+        headerLabel.TextSize = UI.SMALL_TEXT_SIZE
+        headerLabel.TextXAlignment = header.alignment
         headerLabel.Parent = headerFrame
     end
     
@@ -2307,14 +2379,9 @@ end)
 
 print("=== 草药采集系统 (多优先级+Breakthrough) 修复版 ===")
 print("修复内容：")
-print("1. 修复了年份前十草药列表的缩放问题，现在正确使用UI_SCALE配置")
-print("2. 修复了优先级草药列表的缩放问题，滚动区域大小现在正确计算")
-print("3. 修复了优先级寻找逻辑，现在优先考虑年份（年龄），年份相同再考虑距离")
-print("4. 当选择优先级草药时，系统会优先前往年份最大的草药，而不是最近的")
-print("5. 年份前十草药列表现在正确显示优先级标记和颜色编码")
-print("操作说明：")
-print("1. 优先级草药选择后，系统会优先采集年份最大的草药")
-print("2. 如果没有选择优先级草药，系统会采集所有草药中年份最大的")
-print("3. 年份相同的情况下，才会考虑距离因素")
-print("4. 所有UI元素已正确适配手机端大小")
+print("1. 修复了'priority is not a valid member of Part'错误 - 不再直接访问herb.priority")
+print("2. 修复了超时后不前往下一个草药的问题 - 现在超时后会立即寻找并前往替代草药")
+print("3. 修复了年份前十草药列表的缩放问题")
+print("4. 修复了优先级草药列表的缩放问题")
+print("5. 优先级寻找逻辑：优先考虑年份（年龄），年份相同再考虑距离")
 print("系统已启动，可在屏幕左上角查看控制界面")
