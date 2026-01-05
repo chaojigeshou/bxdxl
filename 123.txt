@@ -32,7 +32,7 @@ local CONFIG = {
     BREAKTHROUGH_INTERVAL = 3,      -- 触发Breakthrough的间隔时间（秒）
     ENABLE_BREAKTHROUGH = true,     -- 是否启用Breakthrough功能
     MAX_PRIORITY_HERBS = 5,          -- 最大优先级草药数量
-    SCREEN_SCALE_FACTOR = 0.6,  -- 整体缩放比例（PC端1.0，手机端0.6）
+    SCREEN_SCALE_FACTOR = 0.4,  -- 整体缩放比例（PC端1.0，手机端0.6）
     UI_SCALE = {
         -- 主控制UI尺寸
         MAIN_FRAME_WIDTH = 400,    -- 原500 * 0.8
@@ -2492,3 +2492,4 @@ print("3. 点击Breakthrough开关按钮控制Breakthrough的开启/关闭")
 print("4. 点击'启动系统'按钮启动系统，点击'停止系统'按钮停止系统")
 print("5. 系统会按优先级顺序采摘草药，未选择优先级则采集所有草药")
 print("UI已创建，可在屏幕左上角查看")
+
