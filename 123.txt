@@ -1977,7 +1977,7 @@ local function createControlUI()
     toggleButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
     toggleButton.Position = UDim2.new(0.025, 0, 0, 190)
     toggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
-    toggleButton.Text = "启动系统 (F)"
+    toggleButton.Text = "启动系统"
     toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
     toggleButton.Font = Enum.Font.SourceSansBold
     toggleButton.TextSize = UI.BUTTON_TEXT_SIZE
@@ -2145,7 +2145,7 @@ local function createControlUI()
             stopSystem()
             statusLabel.Text = "状态: 停止"
             statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-            toggleButton.Text = "启动系统 (F)"
+            toggleButton.Text = "启动系统"
             toggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
             targetLabel.Text = "当前目标: 无"
         else
@@ -2153,7 +2153,7 @@ local function createControlUI()
             if startSystem() then
                 statusLabel.Text = "状态: 运行中"
                 statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-                toggleButton.Text = "停止系统 (F)"
+                toggleButton.Text = "停止系统"
                 toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
             else
                 statusLabel.Text = "状态: 启动失败"
@@ -2214,12 +2214,12 @@ local function createControlUI()
             if State.isRunning then
                 statusLabel.Text = "状态: 运行中"
                 statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-                toggleButton.Text = "停止系统 (F)"
+                toggleButton.Text = "停止系统"
                 toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
             else
                 statusLabel.Text = "状态: 停止"
                 statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-                toggleButton.Text = "启动系统 (F)"
+                toggleButton.Text = "启动系统"
                 toggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
             end
         end
@@ -2443,49 +2443,10 @@ local function mainLoop()
     print("[主流程] 已停止")
 end
 
--- ===================== 键盘控制和主程序启动 =====================
--- 创建主控制UI
+-- ===================== 创建主控制UI =====================
 createControlUI()
 
--- 键盘控制（F键切换）
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    
-    if input.KeyCode == Enum.KeyCode.F then
-        if State.isPriorityUIOpen then
-            print("[控制] 优先级选择界面已打开，无法切换系统状态")
-            return
-        end
-        
-        if State.isRunning then
-            print("[控制] 停止系统")
-            stopSystem()
-            if State.ControlUI and State.ControlUI:FindFirstChild("MainFrame") then
-                local statusLabel = State.ControlUI.MainFrame.Status
-                local toggleButton = State.ControlUI.MainFrame.ToggleButton
-                local targetLabel = State.ControlUI.MainFrame.TargetLabel
-                statusLabel.Text = "状态: 停止"
-                statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-                toggleButton.Text = "启动系统 (F)"
-                toggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
-                targetLabel.Text = "当前目标: 无"
-            end
-        else
-            print("[控制] 启动系统")
-            if startSystem() then
-                if State.ControlUI and State.ControlUI:FindFirstChild("MainFrame") then
-                    local statusLabel = State.ControlUI.MainFrame.Status
-                    local toggleButton = State.ControlUI.MainFrame.ToggleButton
-                    statusLabel.Text = "状态: 运行中"
-                    statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-                    toggleButton.Text = "停止系统 (F)"
-                    toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-                end
-            end
-        end
-    end
-end)
-
+-- ===================== 重生处理 =====================
 player.CharacterAdded:Connect(function(newChar)
     print("[重生] 角色重生，重置所有状态")
     character = newChar
@@ -2519,29 +2480,15 @@ player.CharacterAdded:Connect(function(newChar)
     end
 end)
 
-print("=== 草药采集系统 (多优先级+Breakthrough) 修复版 ===")
-print("新增功能：")
-print("1. 单独的优先级选择UI，支持多选草药（最多" .. CONFIG.MAX_PRIORITY_HERBS .. "种）")
-print("2. 第一个选择的草药优先级为1，第二个为2，依此类推")
-print("3. 优先级数字越小，优先级越高")
-print("4. 系统会优先采摘优先级最高的草药")
-print("5. 如果没有选择优先级草药，则采集所有类型的草药（距离优先）")
-print("6. Breakthrough开关按钮，可随时开启/关闭Breakthrough功能")
-print("7. 每3秒自动触发 Breakthrough 远程事件（可开关）")
-print("8. 从ReplicatedStorage的Herbs文件夹获取草药类型列表")
-print("修复内容：")
-print("1. 修复启动系统按钮完全独立工作，不依赖F键")
-print("2. 修复启动/停止按钮可以正常工作")
-print("3. 修复未选择优先级时不会飞行的问题")
-print("4. 添加内存清理机制，解决长时间运行后无法找到草药的bug")
-print("5. 改进对象有效性检查，使用IsDescendantOf确保对象存在")
-print("6. 添加深度搜索功能，当常规搜索失败时尝试全场景搜索")
-print("7. 添加失败计数和自动重置机制")
-print("8. 定期清理无效对象引用，防止内存泄漏")
-print("操作：")
+print("=== 草药采集系统 (多优先级+Breakthrough) 手机适配版 ===")
+print("适配内容：")
+print("1. 已适配手机端UI大小，所有UI元素按比例缩小")
+print("2. 已删除F键控制系统功能，完全由UI按钮接管")
+print("3. 启动/停止系统功能完全由UI按钮控制")
+print("操作说明：")
 print("1. 点击'设置优先级'按钮打开优先级选择界面")
 print("2. 在优先级选择界面中勾选草药（勾选顺序即为优先级顺序）")
 print("3. 点击Breakthrough开关按钮控制Breakthrough的开启/关闭")
-print("4. 按F键或点击UI按钮启动/停止系统")
+print("4. 点击'启动系统'按钮启动系统，点击'停止系统'按钮停止系统")
 print("5. 系统会按优先级顺序采摘草药，未选择优先级则采集所有草药")
 print("UI已创建，可在屏幕左上角查看")
