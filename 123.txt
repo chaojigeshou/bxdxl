@@ -120,19 +120,28 @@ local PillState = {
 
 -- ===================== 移动设备适配 =====================
 local MobileToggleButton = nil
+local MobileToggleGUI = nil
 
 local function createMobileToggle()
-    if UserInputService.KeyboardEnabled then
-        return -- 只在非键盘设备（移动设备）上显示
-    end
-    
+    -- 清理旧按钮
     if CoreGui:FindFirstChild("HerbMobileToggle") then
         CoreGui.HerbMobileToggle:Destroy()
     end
     
+    -- 只在移动设备上显示按钮
+    if UserInputService.KeyboardEnabled and not UserInputService.TouchEnabled then
+        print("[移动端] 检测到键盘设备，隐藏移动端按钮")
+        return
+    end
+    
+    print("[移动端] 创建移动端切换按钮")
+    
     local mobileToggleGUI = Instance.new("ScreenGui")
     mobileToggleGUI.Name = "HerbMobileToggle"
     mobileToggleGUI.Parent = CoreGui
+    mobileToggleGUI.ResetOnSpawn = false
+    mobileToggleGUI.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    mobileToggleGUI.DisplayOrder = 100
     
     local toggleButton = Instance.new("TextButton")
     toggleButton.Name = "ToggleButton"
@@ -147,12 +156,14 @@ local function createMobileToggle()
     toggleButton.TextSize = 14
     toggleButton.Active = true
     toggleButton.Draggable = true
+    toggleButton.Visible = true
     
     local buttonCorner = Instance.new("UICorner")
     buttonCorner.CornerRadius = UDim.new(0, 5)
     buttonCorner.Parent = toggleButton
     
     MobileToggleButton = toggleButton
+    MobileToggleGUI = mobileToggleGUI
     
     return mobileToggleGUI
 end
@@ -241,7 +252,7 @@ local function scanAuras()
         -- 尝试查找任何包含Aura名称的物体
         local allAuras = {}
         for _, child in ipairs(Workspace:GetChildren()) do
-            if child.Name:match("Aura") or child.Name:match("功法") then
+            if child and child:IsA("Model") and (child.Name:match("Aura") or child.Name:match("功法")) then
                 table.insert(allAuras, child)
             end
         end
@@ -309,7 +320,7 @@ local function StopAllMovement()
         HerbState.FlightBodyGyro = nil
     end
     
-    if humanoid then
+    if humanoid and humanoid.Parent then
         humanoid.PlatformStand = false
     end
     
@@ -317,7 +328,7 @@ local function StopAllMovement()
         workspace.Gravity = HerbState.OriginalGravity
     end
     
-    if humanoidRootPart then
+    if humanoidRootPart and humanoidRootPart.Parent then
         humanoidRootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
     end
@@ -1371,8 +1382,10 @@ local function startHerbSystem()
     
     HerbState.isRunning = true
     
-    HerbState.mainLoopCoroutine = coroutine.create(mainLoop)
-    coroutine.resume(HerbState.mainLoopCoroutine)
+    -- 使用task.spawn替代coroutine，更稳定
+    task.spawn(function()
+        mainLoop()
+    end)
     
     print("[系统] 系统已成功启动")
     return true
@@ -1392,13 +1405,6 @@ local function stopHerbSystem()
     StopAllMovement()
     HerbState.currentHerb = nil
     AuraState.currentAura = nil
-    
-    -- 安全地停止协程
-    if HerbState.mainLoopCoroutine and coroutine.status(HerbState.mainLoopCoroutine) ~= "dead" then
-        -- 设置标志让协程自然退出
-        HerbState.isRunning = false
-    end
-    HerbState.mainLoopCoroutine = nil
     
     print("[系统] 系统已停止")
     return true
@@ -1430,8 +1436,7 @@ local function startCraftPills(pillType, count)
     PillState.currentPillType = pillType
     PillState.craftCount = count
     
-    -- 使用单独的协程来处理炼药，以确保正确的间隔
-    PillState.craftCoroutine = coroutine.create(function()
+    task.spawn(function()
         local crafted = 0
         
         while PillState.isCrafting and crafted < count do
@@ -1473,9 +1478,6 @@ local function startCraftPills(pillType, count)
         end
     end)
     
-    -- 启动协程
-    coroutine.resume(PillState.craftCoroutine)
-    
     return true
 end
 
@@ -1486,12 +1488,6 @@ local function stopCraftPills()
     end
     
     PillState.isCrafting = false
-    
-    -- 安全地停止协程
-    if PillState.craftCoroutine and coroutine.status(PillState.craftCoroutine) ~= "dead" then
-        -- 协程会在下一次检查isCrafting时自然退出
-    end
-    PillState.craftCoroutine = nil
     
     print("[炼药] 炼药已停止")
     return true
@@ -2527,6 +2523,7 @@ end
 -- ===================== 创建主UI =====================
 local MainUI = nil
 local CurrentTab = "herb" -- 当前选中的标签
+local UIUpdateConnection = nil
 
 local function createMainUI()
     if MainUI then
@@ -2534,11 +2531,18 @@ local function createMainUI()
         MainUI = nil
     end
     
+    -- 停止旧的UI更新连接
+    if UIUpdateConnection then
+        UIUpdateConnection:Disconnect()
+        UIUpdateConnection = nil
+    end
+    
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "HerbCultivationUI"
     screenGui.ResetOnSpawn = false
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     screenGui.DisplayOrder = 10
+    screenGui.Enabled = true
     
     local UI = CONFIG.UI_SCALE
     
@@ -2880,7 +2884,7 @@ local function createMainUI()
     pillTypeLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 20)
     pillTypeLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 40)
     pillTypeLabel.BackgroundTransparency = 1
-    pillTypeLabel.Text = "当前丹药: Qi Spirit Elixir"
+    pillTypeLabel.Text = "当前丹药: Qi Spirit"
     pillTypeLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
     pillTypeLabel.Font = Enum.Font.SourceSans
     pillTypeLabel.TextSize = UI.SMALL_TEXT_SIZE
@@ -3173,59 +3177,34 @@ local function createMainUI()
     mainFrame.Parent = screenGui
     
     -- 移动设备适配
-    if not UserInputService.KeyboardEnabled then
-        screenGui.Enabled = false
-        if MobileToggleButton then
-            MobileToggleButton.Visible = true
-            MobileToggleButton.MouseButton1Click:Connect(function()
-                screenGui.Enabled = not screenGui.Enabled
-                MobileToggleButton.Visible = not screenGui.Enabled
-                
-                -- 关闭所有打开的UI
-                if PriorityUI then
-                    PriorityUI:Destroy()
-                    PriorityUI = nil
-                    HerbState.isPriorityUIOpen = false
-                end
-                
-                if PillUI then
-                    PillUI:Destroy()
-                    PillUI = nil
-                    PillState.isPillUIOpen = false
-                end
-            end)
-        end
-    else
-        -- 键盘设备也使用移动端小按钮来控制显示/隐藏
-        if MobileToggleButton then
-            MobileToggleButton.Visible = true
-            MobileToggleButton.MouseButton1Click:Connect(function()
-                screenGui.Enabled = not screenGui.Enabled
-                MobileToggleButton.Visible = not screenGui.Enabled
-                
-                -- 关闭所有打开的UI
-                if PriorityUI then
-                    PriorityUI:Destroy()
-                    PriorityUI = nil
-                    HerbState.isPriorityUIOpen = false
-                end
-                
-                if PillUI then
-                    PillUI:Destroy()
-                    PillUI = nil
-                    PillState.isPillUIOpen = false
-                end
-            end)
-        end
+    if MobileToggleButton then
+        MobileToggleButton.Visible = true
+        MobileToggleButton.Text = "隐藏界面"
+        MobileToggleButton.MouseButton1Click:Connect(function()
+            screenGui.Enabled = not screenGui.Enabled
+            MobileToggleButton.Text = screenGui.Enabled and "隐藏界面" or "打开界面"
+            
+            -- 关闭所有打开的UI
+            if PriorityUI then
+                PriorityUI:Destroy()
+                PriorityUI = nil
+                HerbState.isPriorityUIOpen = false
+            end
+            
+            if PillUI then
+                PillUI:Destroy()
+                PillUI = nil
+                PillState.isPillUIOpen = false
+            end
+        end)
     end
     
     screenGui.Parent = player:WaitForChild("PlayerGui")
     
     MainUI = screenGui
     
-    -- 定期更新UI
-    local uiUpdateConnection
-    uiUpdateConnection = RunService.Heartbeat:Connect(function()
+    -- 定期更新UI - 使用更稳定的方式
+    UIUpdateConnection = RunService.Heartbeat:Connect(function()
         if screenGui and screenGui.Parent and screenGui.Enabled then
             -- 草药UI更新
             if herbStatusLabel then
@@ -3249,6 +3228,9 @@ local function createMainUI()
                     local priorityText = priority and string.format(" [优先级%d]", priority) or ""
                     herbTargetLabel.Text = string.format("当前目标: %s (年份: %d)%s", HerbState.currentHerb.Name, age, priorityText)
                     herbTargetLabel.TextColor3 = priority and Color3.fromRGB(255, 215, 0) or Color3.fromRGB(100, 255, 100)
+                elseif AuraState.currentAura and AuraState.currentAura.Parent then
+                    herbTargetLabel.Text = string.format("当前功法: %s", AuraState.currentAura.Name)
+                    herbTargetLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
                 else
                     herbTargetLabel.Text = "当前目标: 无"
                     herbTargetLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
@@ -3337,10 +3319,6 @@ local function createMainUI()
             if pillCountLabel then
                 pillCountLabel.Text = "默认次数: " .. PillState.craftCount
             end
-        else
-            if uiUpdateConnection then
-                uiUpdateConnection:Disconnect()
-            end
         end
     end)
     
@@ -3421,7 +3399,136 @@ player.CharacterAdded:Connect(function(newChar)
         MainUI = nil
     end
     
+    -- 重新创建移动端按钮
+    if MobileToggleGUI then
+        MobileToggleGUI:Destroy()
+        MobileToggleGUI = nil
+    end
+    createMobileToggle()
+    
     createMainUI()
     
     print("[重生] 系统已重置")
 end)
+
+-- ===================== 定期清理和重置机制 =====================
+-- 每30分钟强制清理一次状态，防止长时间运行导致的问题
+task.spawn(function()
+    while true do
+        task.wait(1800) -- 30分钟
+        
+        if HerbState.isRunning then
+            print("[定期清理] 执行定期状态清理...")
+            
+            -- 清理过期的缓存
+            local currentTime = tick()
+            for herb, cacheTime in pairs(HerbState.herbAgeCache) do
+                if currentTime - cacheTime > 600 then -- 10分钟前的缓存
+                    HerbState.herbAgeCache[herb] = nil
+                end
+            end
+            
+            -- 清理过期的超时记录
+            for herb, timeoutTime in pairs(HerbState.timeoutHerbs) do
+                if currentTime - timeoutTime > CONFIG.TIMEOUT_COOLDOWN then
+                    HerbState.timeoutHerbs[herb] = nil
+                end
+            end
+            
+            -- 如果当前目标为空或无效，强制重新寻找
+            if HerbState.currentHerb and (not HerbState.currentHerb.Parent or not HerbState.currentHerb:IsDescendantOf(Workspace)) then
+                print("[定期清理] 当前目标无效，强制重新寻找")
+                HerbState.currentHerb = nil
+            end
+            
+            print("[定期清理] 完成状态清理")
+        end
+    end
+end)
+
+-- ===================== 错误处理和安全机制 =====================
+-- 全局错误捕获，防止脚本崩溃
+local function safeExecute(func, errorMessage)
+    local success, err = pcall(func)
+    if not success then
+        print("[错误] " .. errorMessage .. ": " .. tostring(err))
+        return false
+    end
+    return true
+end
+
+-- 增强版的主循环包装
+local function safeMainLoop()
+    while HerbState.isRunning do
+        local success, err = pcall(function()
+            mainLoop()
+        end)
+        
+        if not success then
+            print("[主循环错误] " .. tostring(err))
+            print("[主循环] 5秒后重启主循环...")
+            
+            -- 清理错误状态
+            disableFlight()
+            HerbState.currentHerb = nil
+            AuraState.currentAura = nil
+            
+            -- 等待5秒后重启
+            for i = 1, 50 do
+                if not HerbState.isRunning then break end
+                task.wait(0.1)
+            end
+            
+            if HerbState.isRunning then
+                print("[主循环] 重启主循环...")
+            end
+        else
+            -- 正常退出
+            break
+        end
+    end
+end
+
+-- 替换原始的startHerbSystem中的mainLoop调用
+local originalStartHerbSystem = startHerbSystem
+startHerbSystem = function()
+    if HerbState.isRunning then
+        print("[系统] 系统已经在运行中")
+        return false
+    end
+    
+    print("[系统] 正在启动系统...")
+    
+    HerbState.retryAttempts = 0
+    HerbState.currentTimeoutCount = 0
+    HerbState.collectedHerbs = {}
+    HerbState.timeoutHerbs = {}
+    HerbState.herbAgeCache = {}
+    HerbState.failCount = 0
+    HerbState.currentHerb = nil
+    AuraState.currentAura = nil
+    HerbState.IsFlying = false
+    
+    if HerbState.FlightBodyVelocity then
+        HerbState.FlightBodyVelocity:Destroy()
+        HerbState.FlightBodyVelocity = nil
+    end
+    if HerbState.FlightBodyGyro then
+        HerbState.FlightBodyGyro:Destroy()
+        HerbState.FlightBodyGyro = nil
+    end
+    if HerbState.FlightConnection then
+        HerbState.FlightConnection:Disconnect()
+        HerbState.FlightConnection = nil
+    end
+    
+    HerbState.isRunning = true
+    
+    -- 使用安全的执行方式
+    task.spawn(safeMainLoop)
+    
+    print("[系统] 系统已成功启动")
+    return true
+end
+
+print("=== 系统初始化完成 ===")
