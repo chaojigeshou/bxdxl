@@ -2,19 +2,23 @@ local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
-local UserInputService = game:GetService("UserInputService")
-local StarterGui = game:GetService("StarterGui")
-local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
 
--- 初始化玩家对象
+-- 初始化玩家
 local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
 local humanoid = character:WaitForChild("Humanoid")
 local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 
+-- 获取远程事件
+local GatherQiEvent = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("GatherQi")
+local BreakthroughEvent = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Breakthrough")
+
 -- 核心配置
 local CONFIG = {
+    -- 草药采摘配置
     FLY_HEIGHT = 700,
     NORMAL_HEIGHT_OFFSET = 5,
     FLY_SPEED = 90,
@@ -26,36 +30,35 @@ local CONFIG = {
     MAX_RETRY_ATTEMPTS = 3,
     FLIGHT_STABILIZATION = 0.95,
     TIMEOUT_COOLDOWN = 30,
-    AGE_PRIORITY_MULTIPLIER = 100,
-    TOP_HERBS_COUNT = 10,
-    UI_UPDATE_INTERVAL = 1,
-    BREAKTHROUGH_INTERVAL = 3,
-    ENABLE_BREAKTHROUGH = true,
     MAX_PRIORITY_HERBS = 5,
-    SCREEN_SCALE_FACTOR = 0.6,
+    UI_UPDATE_INTERVAL = 1,
+    
+    -- 修炼配置
+    BREAKTHROUGH_INTERVAL = 3,
+    
+    -- UI配置
     UI_SCALE = {
-        MAIN_FRAME_WIDTH = 400,
-        MAIN_FRAME_HEIGHT = 560,
-        PRIORITY_FRAME_WIDTH = 400,
-        PRIORITY_FRAME_HEIGHT = 480,
+        MAIN_FRAME_WIDTH = 550,
+        MAIN_FRAME_HEIGHT = 400,
+        TAB_BUTTON_WIDTH = 120,
+        TAB_BUTTON_HEIGHT = 40,
+        PRIORITY_FRAME_WIDTH = 450,
+        PRIORITY_FRAME_HEIGHT = 500,
         TITLE_TEXT_SIZE = 18,
         SUBTITLE_TEXT_SIZE = 14,
         BODY_TEXT_SIZE = 12,
         SMALL_TEXT_SIZE = 10,
-        BUTTON_WIDTH = 170,
         BUTTON_HEIGHT = 32,
         BUTTON_TEXT_SIZE = 14,
-        HERB_ENTRY_HEIGHT = 24,
+        HERB_ITEM_HEIGHT = 35,
         PADDING_SMALL = 8,
-        PADDING_MEDIUM = 16,
-        PADDING_LARGE = 24,
-        SCROLL_AREA_HEIGHT = 320,
-        PRIORITY_SCROLL_HEIGHT = 240,
+        PADDING_MEDIUM = 12,
+        PADDING_LARGE = 16,
     }
 }
 
--- 核心状态
-local State = {
+-- 草药采摘状态
+local HerbState = {
     isRunning = false,
     currentHerb = nil,
     IsFlying = false,
@@ -66,183 +69,146 @@ local State = {
     timeoutHerbs = {},
     retryAttempts = 0,
     OriginalGravity = workspace.Gravity,
-    ControlUI = nil,
-    PriorityUI = nil,
     currentTimeoutCount = 0,
     herbAgeCache = {},
-    topHerbsList = {},
-    uiUpdateConnection = nil,
     failCount = 0,
     priorityHerbs = {},
     availableHerbTypes = {},
-    lastBreakthroughTime = 0,
-    breakthroughConnection = nil,
-    lastUIUpdate = 0,
     isPriorityUIOpen = false,
     mainLoopCoroutine = nil
 }
 
--- ===================== Breakthrough远程事件触发 =====================
-local function triggerBreakthrough()
-    if not CONFIG.ENABLE_BREAKTHROUGH then
-        return
+-- 修炼状态
+local CultState = {
+    isCultivating = false,
+    isAutoBreakthrough = false,
+    breakthroughConnection = nil,
+    lastBreakthroughTime = 0
+}
+
+-- ===================== 移动设备适配 =====================
+local MobileToggleButton = nil
+
+local function createMobileToggle()
+    if UserInputService.KeyboardEnabled then
+        return -- 只在非键盘设备（移动设备）上显示
     end
     
-    local remoteEvent = ReplicatedStorage:FindFirstChild("Remotes")
-    if remoteEvent then
-        remoteEvent = remoteEvent:FindFirstChild("Breakthrough")
+    if CoreGui:FindFirstChild("HerbMobileToggle") then
+        CoreGui.HerbMobileToggle:Destroy()
     end
     
-    if remoteEvent and remoteEvent:IsA("RemoteEvent") then
-        local success, errorMsg = pcall(function()
-            remoteEvent:FireServer()
-        end)
-        
-        if success then
-            print("[Breakthrough] 触发成功")
-        else
-            warn("[Breakthrough] 触发失败: " .. tostring(errorMsg))
-        end
-    else
-        warn("[Breakthrough] 未找到 Breakthrough 远程事件")
-    end
+    local mobileToggleGUI = Instance.new("ScreenGui")
+    mobileToggleGUI.Name = "HerbMobileToggle"
+    mobileToggleGUI.Parent = CoreGui
+    
+    local toggleButton = Instance.new("TextButton")
+    toggleButton.Name = "ToggleButton"
+    toggleButton.Parent = mobileToggleGUI
+    toggleButton.BackgroundColor3 = Color3.fromRGB(40, 60, 40)
+    toggleButton.BorderColor3 = Color3.fromRGB(29, 29, 35)
+    toggleButton.Position = UDim2.new(0.005, 0, 0.4, 0)
+    toggleButton.Size = UDim2.new(0, 80, 0, 36)
+    toggleButton.Font = Enum.Font.SourceSansBold
+    toggleButton.Text = "打开界面"
+    toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    toggleButton.TextSize = 14
+    toggleButton.Active = true
+    toggleButton.Draggable = true
+    
+    local buttonCorner = Instance.new("UICorner")
+    buttonCorner.CornerRadius = UDim.new(0, 5)
+    buttonCorner.Parent = toggleButton
+    
+    MobileToggleButton = toggleButton
+    
+    return mobileToggleGUI
 end
 
-local function startBreakthroughTimer()
-    if State.breakthroughConnection then
-        State.breakthroughConnection:Disconnect()
-        State.breakthroughConnection = nil
+-- ===================== 修炼功能 =====================
+local function toggleCultivation()
+    local xiulian = player:GetAttribute("Gathering")
+    
+    if xiulian == true then
+        print("[修炼] 已在修炼状态，退出修炼")
+        GatherQiEvent:FireServer()
+        CultState.isCultivating = false
+    else
+        print("[修炼] 未在修炼状态，进入修炼")
+        GatherQiEvent:FireServer()
+        CultState.isCultivating = true
     end
     
-    if not CONFIG.ENABLE_BREAKTHROUGH then
+    return CultState.isCultivating
+end
+
+local function startAutoBreakthrough()
+    if CultState.isAutoBreakthrough then
+        print("[突破] 自动突破已在运行中")
         return
     end
     
-    State.breakthroughConnection = RunService.Heartbeat:Connect(function()
+    CultState.isAutoBreakthrough = true
+    CultState.lastBreakthroughTime = 0
+    
+    if CultState.breakthroughConnection then
+        CultState.breakthroughConnection:Disconnect()
+        CultState.breakthroughConnection = nil
+    end
+    
+    CultState.breakthroughConnection = RunService.Heartbeat:Connect(function()
         local currentTime = tick()
-        if currentTime - State.lastBreakthroughTime >= CONFIG.BREAKTHROUGH_INTERVAL then
-            State.lastBreakthroughTime = currentTime
-            triggerBreakthrough()
+        if currentTime - CultState.lastBreakthroughTime >= CONFIG.BREAKTHROUGH_INTERVAL then
+            CultState.lastBreakthroughTime = currentTime
+            
+            if CultState.isCultivating then
+                BreakthroughEvent:FireServer()
+                print("[突破] 发送突破请求")
+            else
+                print("[突破] 未在修炼状态，跳过突破")
+            end
         end
     end)
     
-    print("[Breakthrough] 定时触发已启动（间隔: " .. CONFIG.BREAKTHROUGH_INTERVAL .. "秒）")
+    print("[突破] 自动突破已启动（间隔: " .. CONFIG.BREAKTHROUGH_INTERVAL .. "秒）")
 end
 
-local function stopBreakthroughTimer()
-    if State.breakthroughConnection then
-        State.breakthroughConnection:Disconnect()
-        State.breakthroughConnection = nil
-        print("[Breakthrough] 定时触发已停止")
+local function stopAutoBreakthrough()
+    if not CultState.isAutoBreakthrough then
+        print("[突破] 自动突破未在运行")
+        return
     end
+    
+    CultState.isAutoBreakthrough = false
+    
+    if CultState.breakthroughConnection then
+        CultState.breakthroughConnection:Disconnect()
+        CultState.breakthroughConnection = nil
+    end
+    
+    print("[突破] 自动突破已停止")
 end
 
--- ===================== 从ReplicatedStorage获取草药列表 =====================
-local function loadHerbTypesFromReplicatedStorage()
-    local herbsList = {}
-    
-    local herbsFolder = ReplicatedStorage:FindFirstChild("Herbs")
-    
-    if herbsFolder then
-        print("[草药类型] 从ReplicatedStorage的Herbs文件夹加载草药类型")
-        
-        for _, item in ipairs(herbsFolder:GetChildren()) do
-            if item:IsA("Model") or item:IsA("MeshPart") or item:IsA("Part") then
-                table.insert(herbsList, item.Name)
-                print("[草药类型] 找到草药类型: " .. item.Name)
-            end
-        end
-    else
-        print("[草药类型] 未找到ReplicatedStorage的Herbs文件夹，尝试其他方式")
-        
-        local workspaceHerbs = Workspace:FindFirstChild("Herbs")
-        if workspaceHerbs then
-            local seenNames = {}
-            for _, herb in ipairs(workspaceHerbs:GetChildren()) do
-                if (herb:IsA("MeshPart") or herb:IsA("Part")) and not seenNames[herb.Name] then
-                    table.insert(herbsList, herb.Name)
-                    seenNames[herb.Name] = true
-                    print("[草药类型] 从Workspace找到草药类型: " .. herb.Name)
-                end
-            end
-        end
-        
-        if #herbsList == 0 then
-            print("[草药类型] 使用默认草药名称列表")
-            herbsList = {"灵芝", "人参", "雪莲", "龙涎草", "凤凰花", "玄黄草", "地心莲", "天星草", "幽冥花", "赤阳参"}
-        end
+local function breakthroughOnce()
+    if not CultState.isCultivating then
+        print("[突破] 未在修炼状态，无法突破")
+        return false
     end
     
-    if #herbsList == 0 then
-        table.insert(herbsList, "未知草药")
-    end
-    
-    table.sort(herbsList)
-    
-    State.availableHerbTypes = herbsList
-    print("[草药类型] 已加载 " .. #herbsList .. " 种草药类型")
-    
-    return herbsList
+    BreakthroughEvent:FireServer()
+    print("[突破] 单次突破请求已发送")
+    return true
 end
 
--- ===================== 内存清理函数 =====================
-local function cleanupMemory()
-    local currentTime = tick()
-    local cleanedCount = 0
-    
-    for herb, _ in pairs(State.collectedHerbs) do
-        if not herb or not herb.Parent or not herb:IsDescendantOf(Workspace) then
-            State.collectedHerbs[herb] = nil
-            cleanedCount = cleanedCount + 1
-        end
-    end
-    
-    for herb, timeoutTime in pairs(State.timeoutHerbs) do
-        if not herb or not herb.Parent or not herb:IsDescendantOf(Workspace) then
-            State.timeoutHerbs[herb] = nil
-            cleanedCount = cleanedCount + 1
-        elseif currentTime - timeoutTime > CONFIG.TIMEOUT_COOLDOWN * 2 then
-            State.timeoutHerbs[herb] = nil
-            cleanedCount = cleanedCount + 1
-        end
-    end
-    
-    for herb, _ in pairs(State.herbAgeCache) do
-        if not herb or not herb.Parent or not herb:IsDescendantOf(Workspace) then
-            State.herbAgeCache[herb] = nil
-            cleanedCount = cleanedCount + 1
-        end
-    end
-    
-    if cleanedCount > 0 then
-        print(string.format("[内存清理] 清理了 %d 个无效对象引用", cleanedCount))
-    end
-    
-    return cleanedCount
-end
-
--- ===================== 重置扫描状态函数 =====================
-local function resetScanState()
-    print("[重置] 正在重置扫描状态...")
-    
-    State.collectedHerbs = {}
-    State.timeoutHerbs = {}
-    State.herbAgeCache = {}
-    
-    cleanupMemory()
-    
-    print("[重置] 扫描状态已重置")
-end
-
--- ===================== 飞行控制 =====================
+-- ===================== 草药采摘功能 =====================
 local function StopAllMovement()
-    if State.FlightBodyVelocity then
-        State.FlightBodyVelocity:Destroy()
-        State.FlightBodyVelocity = nil
+    if HerbState.FlightBodyVelocity then
+        HerbState.FlightBodyVelocity:Destroy()
+        HerbState.FlightBodyVelocity = nil
     end
-    if State.FlightBodyGyro then
-        State.FlightBodyGyro:Destroy()
-        State.FlightBodyGyro = nil
+    if HerbState.FlightBodyGyro then
+        HerbState.FlightBodyGyro:Destroy()
+        HerbState.FlightBodyGyro = nil
     end
     
     if humanoid then
@@ -250,7 +216,7 @@ local function StopAllMovement()
     end
     
     if workspace then
-        workspace.Gravity = State.OriginalGravity
+        workspace.Gravity = HerbState.OriginalGravity
     end
     
     if humanoidRootPart then
@@ -258,18 +224,18 @@ local function StopAllMovement()
         humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
     end
     
-    State.IsFlying = false
-    if State.FlightConnection then
-        State.FlightConnection:Disconnect()
-        State.FlightConnection = nil
+    HerbState.IsFlying = false
+    if HerbState.FlightConnection then
+        HerbState.FlightConnection:Disconnect()
+        HerbState.FlightConnection = nil
     end
 end
 
 local function enableFlight()
-    if State.IsFlying or not humanoid or not humanoidRootPart then return end
+    if HerbState.IsFlying or not humanoid or not humanoidRootPart then return end
     
     humanoid.PlatformStand = true
-    workspace.Gravity = State.OriginalGravity * 0.1
+    workspace.Gravity = HerbState.OriginalGravity * 0.1
     
     local bodyVelocity = Instance.new("BodyVelocity")
     bodyVelocity.Name = "FlightVelocity"
@@ -277,7 +243,7 @@ local function enableFlight()
     bodyVelocity.Velocity = Vector3.new(0, 0, 0)
     bodyVelocity.P = 1000
     bodyVelocity.Parent = humanoidRootPart
-    State.FlightBodyVelocity = bodyVelocity
+    HerbState.FlightBodyVelocity = bodyVelocity
     
     local bodyGyro = Instance.new("BodyGyro")
     bodyGyro.Name = "FlightGyro"
@@ -286,12 +252,12 @@ local function enableFlight()
     bodyGyro.P = 1000
     bodyGyro.D = 500
     bodyGyro.Parent = humanoidRootPart
-    State.FlightBodyGyro = bodyGyro
+    HerbState.FlightBodyGyro = bodyGyro
     
     local lastVelocity = Vector3.new(0, 0, 0)
     local lastUpdate = tick()
-    State.FlightConnection = RunService.Heartbeat:Connect(function()
-        if not State.IsFlying or not humanoidRootPart or not humanoidRootPart.Parent then
+    HerbState.FlightConnection = RunService.Heartbeat:Connect(function()
+        if not HerbState.IsFlying or not humanoidRootPart or not humanoidRootPart.Parent then
             StopAllMovement()
             return
         end
@@ -315,64 +281,87 @@ local function enableFlight()
         
         local smoothY = lastVelocity.Y * CONFIG.FLIGHT_STABILIZATION + yVelocity * (1 - CONFIG.FLIGHT_STABILIZATION)
         
-        State.FlightBodyVelocity.Velocity = Vector3.new(
-            State.FlightBodyVelocity.Velocity.X,
+        HerbState.FlightBodyVelocity.Velocity = Vector3.new(
+            HerbState.FlightBodyVelocity.Velocity.X,
             smoothY,
-            State.FlightBodyVelocity.Velocity.Z
+            HerbState.FlightBodyVelocity.Velocity.Z
         )
         
-        lastVelocity = State.FlightBodyVelocity.Velocity
+        lastVelocity = HerbState.FlightBodyVelocity.Velocity
         
-        if State.FlightBodyGyro then
-            State.FlightBodyGyro.CFrame = humanoidRootPart.CFrame
+        if HerbState.FlightBodyGyro then
+            HerbState.FlightBodyGyro.CFrame = humanoidRootPart.CFrame
         end
-    end)
+        end)
     
-    State.IsFlying = true
+    HerbState.IsFlying = true
     print("[飞行] 飞行模式已启用")
 end
 
 local function disableFlight()
-    if not State.IsFlying then return end
+    if not HerbState.IsFlying then return end
     StopAllMovement()
     print("[飞行] 飞行模式已禁用")
 end
 
--- ===================== 草药扫描与寻找 =====================
 local function getHerbAge(herb)
-    if not herb or not herb.Parent or not herb:IsDescendantOf(Workspace) then
+    if not herb or not herb.Parent then
         return 0
     end
     
-    if State.herbAgeCache[herb] ~= nil then
-        return State.herbAgeCache[herb]
+    if HerbState.herbAgeCache[herb] ~= nil then
+        return HerbState.herbAgeCache[herb]
     end
     
     local age = 0
-    local success, result = pcall(function()
-        return herb:GetAttribute("Age")
-    end)
     
-    if success and result ~= nil then
-        age = tonumber(result) or 0
+    -- 如果是Model，尝试查找其中的Age值
+    if herb:IsA("Model") then
+        -- 查找Model中的Age属性或AgeValue
+        local success, result = pcall(function()
+            return herb:GetAttribute("Age")
+        end)
+        
+        if success and result ~= nil then
+            age = tonumber(result) or 0
+        else
+            -- 查找Model中的子对象
+            if herb:FindFirstChild("AgeValue") and herb.AgeValue:IsA("ValueBase") then
+                age = tonumber(herb.AgeValue.Value) or 0
+            elseif herb:FindFirstChild("Age") then
+                local ageObj = herb:FindFirstChild("Age")
+                if ageObj:IsA("ValueBase") then
+                    age = tonumber(ageObj.Value) or 0
+                end
+            end
+        end
     else
-        if herb:FindFirstChild("AgeValue") then
-            age = tonumber(herb.AgeValue.Value) or 0
-        elseif herb:FindFirstChild("Age") then
-            age = tonumber(herb.Age) or 0
+        -- 普通Part/MeshPart的处理
+        local success, result = pcall(function()
+            return herb:GetAttribute("Age")
+        end)
+        
+        if success and result ~= nil then
+            age = tonumber(result) or 0
+        else
+            if herb:FindFirstChild("AgeValue") then
+                age = tonumber(herb.AgeValue.Value) or 0
+            elseif herb:FindFirstChild("Age") then
+                age = tonumber(herb.Age) or 0
+            end
         end
     end
     
-    State.herbAgeCache[herb] = age
+    HerbState.herbAgeCache[herb] = age
     return age
 end
 
 local function getHerbPriority(herbName)
-    if not herbName or #State.priorityHerbs == 0 then
+    if not herbName or #HerbState.priorityHerbs == 0 then
         return nil
     end
     
-    for _, priorityHerb in ipairs(State.priorityHerbs) do
+    for _, priorityHerb in ipairs(HerbState.priorityHerbs) do
         if priorityHerb.name == herbName then
             return priorityHerb.priority
         end
@@ -381,118 +370,90 @@ local function getHerbPriority(herbName)
     return nil
 end
 
-local function filterHerbsByPriority(herbs)
-    if #State.priorityHerbs == 0 then
-        return herbs, {}, false
-    end
-    
-    local priorityHerbs = {}
-    local nonPriorityHerbs = {}
-    local priorityMap = {}
-    
-    for _, priorityHerb in ipairs(State.priorityHerbs) do
-        priorityMap[priorityHerb.name] = priorityHerb.priority
-    end
-    
-    for _, herb in ipairs(herbs) do
-        if herb and herb.Parent and herb:IsDescendantOf(Workspace) then
-            local priority = priorityMap[herb.Name]
-            if priority then
-                table.insert(priorityHerbs, {
-                    herb = herb,
-                    priority = priority
-                })
-            else
-                table.insert(nonPriorityHerbs, herb)
-            end
-        end
-    end
-    
-    return priorityHerbs, nonPriorityHerbs, true
-end
-
 local function scanHerbs()
-    cleanupMemory()
-    
     local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
     if not herbsFolder then 
         warn("[扫描] 未找到草药文件夹：" .. CONFIG.HERBS_FOLDER_NAME)
         
-        task.wait(1)
-        herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
+        -- 尝试其他名称
+        for _, child in ipairs(Workspace:GetChildren()) do
+            if child.Name:match("Herb") or child.Name:match("草药") then
+                herbsFolder = child
+                break
+            end
+        end
+        
         if not herbsFolder then
-            local herbKeywords = {"Herb", "Plant", "草药", "药草", "采集物"}
-            for _, child in ipairs(Workspace:GetChildren()) do
-                for _, keyword in ipairs(herbKeywords) do
-                    if child.Name:match(keyword) then
-                        herbsFolder = child
-                        break
-                    end
-                end
-                if herbsFolder then break end
-            end
-            
-            if not herbsFolder then
-                return {} 
-            else
-                print("[扫描] 找到替代草药文件夹：" .. herbsFolder.Name)
-            end
+            return {} 
+        else
+            print("[扫描] 找到替代草药文件夹：" .. herbsFolder.Name)
         end
     end
 
     local validHerbs = {}
-    local meshPartCount = 0
-    local partCount = 0
     local currentTime = tick()
     
+    -- 清理过期的超时记录
+    for herb, timeoutTime in pairs(HerbState.timeoutHerbs) do
+        if currentTime - timeoutTime > CONFIG.TIMEOUT_COOLDOWN then
+            HerbState.timeoutHerbs[herb] = nil
+        end
+    end
+    
+    -- 扫描所有草药对象
     for _, item in ipairs(herbsFolder:GetChildren()) do
         if not item or not item.Parent then
             continue
         end
         
-        local isValidType = item:IsA("MeshPart") or item:IsA("Part")
-        local isInWorkspace = item:IsDescendantOf(Workspace)
-        
+        -- 检查是否已采集
         local isCollected = false
-        for collectedHerb, _ in pairs(State.collectedHerbs) do
+        for collectedHerb, _ in pairs(HerbState.collectedHerbs) do
             if collectedHerb and collectedHerb == item then
                 isCollected = true
                 break
             end
         end
         
+        -- 检查是否超时
         local isTimedOut = false
-        for timeoutHerb, timeoutTime in pairs(State.timeoutHerbs) do
+        for timeoutHerb, timeoutTime in pairs(HerbState.timeoutHerbs) do
             if timeoutHerb and timeoutHerb == item then
                 if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
                     isTimedOut = true
-                else
-                    State.timeoutHerbs[timeoutHerb] = nil
                 end
                 break
             end
         end
         
-        local isCurrentTarget = (State.currentHerb and State.currentHerb == item)
+        local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == item)
         
-        if isValidType and isInWorkspace and not isCollected and not isTimedOut and (not isCurrentTarget or not item.Parent) then
-            table.insert(validHerbs, item)
-            if item:IsA("MeshPart") then
-                meshPartCount += 1
+        -- 支持多种类型的草药对象
+        local isValidType = item:IsA("MeshPart") or item:IsA("Part") or item:IsA("Model")
+        
+        if isValidType and not isCollected and not isTimedOut and (not isCurrentTarget or not item.Parent) then
+            -- 如果是Model，检查其中是否有可交互的部分
+            if item:IsA("Model") then
+                -- 检查Model是否有PrimaryPart或者任何MeshPart/Part
+                if item.PrimaryPart or #item:GetChildren() > 0 then
+                    table.insert(validHerbs, item)
+                    print(string.format("[扫描] 找到Model类型草药: %s", item.Name))
+                end
             else
-                partCount += 1
+                table.insert(validHerbs, item)
             end
         end
     end
     
+    -- 如果未找到草药，尝试深度搜索
     if #validHerbs == 0 then
         local allHerbs = {}
         local function deepSearch(folder)
             for _, child in ipairs(folder:GetChildren()) do
                 if child:IsA("Folder") or child:IsA("Model") then
                     deepSearch(child)
-                elseif (child:IsA("MeshPart") or child:IsA("Part")) and child:IsDescendantOf(Workspace) then
-                    local herbKeywords = {"Herb", "Plant", "草药", "药草", "采集物", "Resource", "素材"}
+                elseif (child:IsA("MeshPart") or child:IsA("Part")) then
+                    local herbKeywords = {"Herb", "Plant", "草药", "药草", "采集物"}
                     for _, keyword in ipairs(herbKeywords) do
                         if child.Name:match(keyword) then
                             table.insert(allHerbs, child)
@@ -511,24 +472,75 @@ local function scanHerbs()
         end
     end
     
-    print(string.format("[扫描] 找到有效草药数量：%d（MeshPart：%d，Part：%d）", 
-        #validHerbs, meshPartCount, partCount))
+    print(string.format("[扫描] 找到有效草药数量：%d", #validHerbs))
     
     return validHerbs
 end
 
--- 根据优先级选择最佳草药（修改：优先考虑年份，年份相同再考虑距离）
+local function filterHerbsByPriority(herbs)
+    if #HerbState.priorityHerbs == 0 then
+        return herbs, {}, false
+    end
+    
+    local priorityHerbs = {}
+    local nonPriorityHerbs = {}
+    local priorityMap = {}
+    
+    for _, priorityHerb in ipairs(HerbState.priorityHerbs) do
+        priorityMap[priorityHerb.name] = priorityHerb.priority
+    end
+    
+    for _, herb in ipairs(herbs) do
+        if herb and herb.Parent then
+            local priority = priorityMap[herb.Name]
+            if priority then
+                table.insert(priorityHerbs, {
+                    herb = herb,
+                    priority = priority
+                })
+            else
+                table.insert(nonPriorityHerbs, herb)
+            end
+        end
+    end
+    
+    return priorityHerbs, nonPriorityHerbs, true
+end
+
+local function getHerbPosition(herb)
+    if not herb then
+        return Vector3.new(0, 0, 0)
+    end
+    
+    if herb:IsA("Model") then
+        if herb.PrimaryPart then
+            return herb.PrimaryPart.Position
+        else
+            -- 尝试找到第一个Part的位置
+            for _, child in ipairs(herb:GetChildren()) do
+                if child:IsA("BasePart") then
+                    return child.Position
+                end
+            end
+        end
+    end
+    
+    -- 默认情况
+    return herb.Position
+end
+
 local function findBestHerb()
     local allHerbs = scanHerbs()
     if #allHerbs == 0 then 
         print("[寻找] 未找到任何有效草药")
+        HerbState.failCount = HerbState.failCount + 1
         
-        State.failCount = State.failCount + 1
-        
-        if State.failCount >= 3 then
+        if HerbState.failCount >= 3 then
             print("[寻找] 连续3次未找到草药，重置扫描状态")
-            resetScanState()
-            State.failCount = 0
+            HerbState.collectedHerbs = {}
+            HerbState.timeoutHerbs = {}
+            HerbState.herbAgeCache = {}
+            HerbState.failCount = 0
             
             allHerbs = scanHerbs()
             if #allHerbs == 0 then
@@ -539,24 +551,24 @@ local function findBestHerb()
             return nil 
         end
     else
-        State.failCount = 0
+        HerbState.failCount = 0
     end
 
     local priorityHerbs, nonPriorityHerbs, hasPriority = filterHerbsByPriority(allHerbs)
     
     -- 如果有优先级草药，按年份从大到小排序，年份相同按距离从小到大排序
     if hasPriority and #priorityHerbs > 0 then
-        print(string.format("[优先级] 用户选择了 %d 种优先级草药", #State.priorityHerbs))
+        print(string.format("[优先级] 用户选择了 %d 种优先级草药", #HerbState.priorityHerbs))
         
-        -- 收集所有优先级草药
         local allPriorityHerbs = {}
         for _, priorityInfo in ipairs(priorityHerbs) do
             local herb = priorityInfo.herb
             local priority = priorityInfo.priority
             
-            if herb and herb.Parent and herb:IsDescendantOf(Workspace) then
+            if herb and herb.Parent then
                 local age = getHerbAge(herb)
-                local distance = (herb.Position - humanoidRootPart.Position).Magnitude
+                local herbPos = getHerbPosition(herb)
+                local distance = (herbPos - humanoidRootPart.Position).Magnitude
                 
                 table.insert(allPriorityHerbs, {
                     herb = herb,
@@ -564,29 +576,24 @@ local function findBestHerb()
                     age = age,
                     distance = distance
                 })
-                
-                print(string.format("[优先级] 找到优先级%d草药: %s (Age: %d, 距离: %.1f米)", 
-                    priority, herb.Name, age, distance))
             end
         end
         
         if #allPriorityHerbs > 0 then
-            -- 按年份从大到小排序，年份相同按距离从小到大排序
             table.sort(allPriorityHerbs, function(a, b)
                 if a.age ~= b.age then
-                    return a.age > b.age  -- 年份大的优先
+                    return a.age > b.age
                 else
-                    return a.distance < b.distance  -- 年份相同，距离近的优先
+                    return a.distance < b.distance
                 end
             end)
             
             local bestHerb = allPriorityHerbs[1].herb
             local bestAge = allPriorityHerbs[1].age
             local bestDistance = allPriorityHerbs[1].distance
-            local bestPriority = allPriorityHerbs[1].priority
             
-            print(string.format("[优先级] 选择年份最大草药: %s (年份: %d, 距离: %.1f米, 优先级: %d)", 
-                bestHerb.Name, bestAge, bestDistance, bestPriority))
+            print(string.format("[优先级] 选择年份最大草药: %s (年份: %d, 距离: %.1f米)", 
+                bestHerb.Name, bestAge, bestDistance))
             
             return bestHerb
         else
@@ -606,14 +613,14 @@ local function findBestHerb()
     if #herbsToCheck > 0 then
         print(string.format("[寻找] 在 %d 个草药中寻找年份最大的", #herbsToCheck))
         
-        -- 收集所有草药的年份和距离信息
         local herbInfoList = {}
         local playerPos = humanoidRootPart.Position
         
         for _, herb in ipairs(herbsToCheck) do
-            if herb and herb.Parent and herb:IsDescendantOf(Workspace) then
+            if herb and herb.Parent then
                 local age = getHerbAge(herb)
-                local distance = (herb.Position - playerPos).Magnitude
+                local herbPos = getHerbPosition(herb)
+                local distance = (herbPos - playerPos).Magnitude
                 
                 table.insert(herbInfoList, {
                     herb = herb,
@@ -628,22 +635,13 @@ local function findBestHerb()
             return nil
         end
         
-        -- 按年份从大到小排序，年份相同按距离从小到大排序
         table.sort(herbInfoList, function(a, b)
             if a.age ~= b.age then
-                return a.age > b.age  -- 年份大的优先
+                return a.age > b.age
             else
-                return a.distance < b.distance  -- 年份相同，距离近的优先
+                return a.distance < b.distance
             end
         end)
-        
-        -- 显示前3个年份最大草药的信息
-        for i = 1, math.min(3, #herbInfoList) do
-            local herbInfo = herbInfoList[i]
-            local herbType = herbInfo.herb:IsA("MeshPart") and "MeshPart" or "Part"
-            print(string.format("[寻找] 第%d年份最大草药: %s (类型: %s, 年份: %d, 距离: %.1f)", 
-                i, herbInfo.herb.Name, herbType, herbInfo.age, herbInfo.distance))
-        end
         
         local bestHerb = herbInfoList[1].herb
         local bestAge = herbInfoList[1].age
@@ -659,129 +657,8 @@ local function findBestHerb()
     return nil
 end
 
--- 修复：移除对herb.priority的直接访问，改用存储的优先级信息
-local function findAlternativeHerb(excludeHerb)
-    print("[寻找] 正在寻找替代草药...")
-    local allHerbs = scanHerbs()
-    if #allHerbs == 0 then 
-        print("[寻找] 未找到任何替代草药")
-        return nil 
-    end
-
-    local priorityHerbs, nonPriorityHerbs, hasPriority = filterHerbsByPriority(allHerbs)
-    
-    -- 收集所有替代草药信息
-    local herbInfoList = {}
-    local currentPos = excludeHerb and excludeHerb.Position or humanoidRootPart.Position
-    
-    -- 添加优先级草药
-    if hasPriority and #priorityHerbs > 0 then
-        for _, priorityInfo in ipairs(priorityHerbs) do
-            local herb = priorityInfo.herb
-            local priority = priorityInfo.priority
-            
-            if herb and herb ~= excludeHerb and herb.Parent and herb:IsDescendantOf(Workspace) then
-                -- 检查是否超时
-                local isTimedOut = false
-                for timeoutHerb, timeoutTime in pairs(State.timeoutHerbs) do
-                    if timeoutHerb and timeoutHerb == herb then
-                        if tick() - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
-                            isTimedOut = true
-                        end
-                        break
-                    end
-                end
-                
-                if not isTimedOut then
-                    local age = getHerbAge(herb)
-                    local distance = (herb.Position - currentPos).Magnitude
-                    
-                    table.insert(herbInfoList, {
-                        herb = herb,
-                        age = age,
-                        distance = distance,
-                        isPriority = true,
-                        priority = priority
-                    })
-                end
-            end
-        end
-    end
-    
-    -- 添加非优先级草药
-    for _, herb in ipairs(nonPriorityHerbs) do
-        if herb and herb ~= excludeHerb and herb.Parent and herb:IsDescendantOf(Workspace) then
-            -- 检查是否超时
-            local isTimedOut = false
-            for timeoutHerb, timeoutTime in pairs(State.timeoutHerbs) do
-                if timeoutHerb and timeoutHerb == herb then
-                    if tick() - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
-                        isTimedOut = true
-                    end
-                    break
-                end
-            end
-            
-            if not isTimedOut then
-                local age = getHerbAge(herb)
-                local distance = (herb.Position - currentPos).Magnitude
-                
-                table.insert(herbInfoList, {
-                    herb = herb,
-                    age = age,
-                    distance = distance,
-                    isPriority = false
-                })
-            end
-        end
-    end
-    
-    if #herbInfoList == 0 then
-        print("[寻找] 没有其他可用的替代草药")
-        return nil
-    end
-    
-    -- 按年份和优先级排序
-    table.sort(herbInfoList, function(a, b)
-        -- 都是优先级草药
-        if a.isPriority and b.isPriority then
-            if a.priority ~= b.priority then
-                return a.priority < b.priority  -- 优先级数字小的优先
-            elseif a.age ~= b.age then
-                return a.age > b.age  -- 年份大的优先
-            else
-                return a.distance < b.distance  -- 距离近的优先
-            end
-        -- 一个优先级一个非优先级，优先级优先
-        elseif a.isPriority and not b.isPriority then
-            return true
-        elseif not a.isPriority and b.isPriority then
-            return false
-        -- 都是非优先级草药，按年份排序
-        else
-            if a.age ~= b.age then
-                return a.age > b.age  -- 年份大的优先
-            else
-                return a.distance < b.distance  -- 距离近的优先
-            end
-        end
-    end)
-    
-    local bestAlternative = herbInfoList[1].herb
-    local bestAge = herbInfoList[1].age
-    local bestDistance = herbInfoList[1].distance
-    local isPriority = herbInfoList[1].isPriority
-    local priorityText = isPriority and string.format(" [优先级%d]", herbInfoList[1].priority) or ""
-    
-    print(string.format("[寻找] 找到最佳替代草药: %s (年份: %d, 距离: %.1f米)%s", 
-        bestAlternative.Name, bestAge, bestDistance, priorityText))
-    
-    return bestAlternative
-end
-
--- ===================== 移动与高度控制 =====================
 local function flyToHerb(herb)
-    if not herb or not State.IsFlying or not State.FlightBodyVelocity then 
+    if not herb or not HerbState.IsFlying or not HerbState.FlightBodyVelocity then 
         warn("[飞行] 飞行组件未初始化")
         return false 
     end
@@ -789,39 +666,40 @@ local function flyToHerb(herb)
     print(string.format("[飞行] 开始前往草药：%s", herb.Name))
     local startTime = tick()
 
-    while State.isRunning and herb and herb.Parent and herb:IsDescendantOf(Workspace) do
+    while HerbState.isRunning and herb and herb.Parent do
         if tick() - startTime > CONFIG.MOVE_TIMEOUT then
             warn("[飞行] 前往草药超时（超过" .. CONFIG.MOVE_TIMEOUT .. "秒）")
-            State.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
-            State.timeoutHerbs[herb] = tick()
-            State.currentTimeoutCount = State.currentTimeoutCount + 1
+            HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+            HerbState.timeoutHerbs[herb] = tick()
+            HerbState.currentTimeoutCount = HerbState.currentTimeoutCount + 1
             print("[飞行] 已将草药 " .. herb.Name .. " 加入超时列表")
             return false
         end
 
-        local targetPos = Vector3.new(herb.Position.X, CONFIG.FLY_HEIGHT, herb.Position.Z)
+        local herbPos = getHerbPosition(herb)
+        local targetPos = Vector3.new(herbPos.X, CONFIG.FLY_HEIGHT, herbPos.Z)
         local direction = (targetPos - humanoidRootPart.Position).Unit
         local distance = (targetPos - humanoidRootPart.Position).Magnitude
 
         if distance <= CONFIG.MOVE_DISTANCE_THRESHOLD then
-            State.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
-            State.currentTimeoutCount = 0
+            HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+            HerbState.currentTimeoutCount = 0
             print(string.format("[飞行] 到达草药 %s 正上方（距离：%.1f米）", herb.Name, distance))
             return true
         end
 
-        State.FlightBodyVelocity.Velocity = Vector3.new(
+        HerbState.FlightBodyVelocity.Velocity = Vector3.new(
             direction.X * CONFIG.FLY_SPEED,
-            State.FlightBodyVelocity.Velocity.Y,
+            HerbState.FlightBodyVelocity.Velocity.Y,
             direction.Z * CONFIG.FLY_SPEED
         )
         RunService.Heartbeat:Wait()
     end
 
-    State.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+    HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
     if herb and herb.Parent then
-        State.timeoutHerbs[herb] = tick()
-        State.currentTimeoutCount = State.currentTimeoutCount + 1
+        HerbState.timeoutHerbs[herb] = tick()
+        HerbState.currentTimeoutCount = HerbState.currentTimeoutCount + 1
         print("[飞行] 草药已销毁，已加入超时列表")
     end
     warn("[飞行] 草药已销毁或系统已停止，终止飞行")
@@ -829,29 +707,30 @@ local function flyToHerb(herb)
 end
 
 local function descendToCollectHeight(herb)
-    if not herb or not herb.Parent or not herb:IsDescendantOf(Workspace) then 
+    if not herb or not herb.Parent then 
         warn("[下降] 草药不存在，无法下降")
         return false 
     end
 
     print("[高度] 开始下降到采集高度")
     
-    if State.FlightConnection then
-        State.FlightConnection:Disconnect()
-        State.FlightConnection = nil
+    if HerbState.FlightConnection then
+        HerbState.FlightConnection:Disconnect()
+        HerbState.FlightConnection = nil
     end
     
-    State.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+    HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
     
-    if State.FlightBodyGyro then
-        State.FlightBodyGyro:Destroy()
-        State.FlightBodyGyro = nil
+    if HerbState.FlightBodyGyro then
+        HerbState.FlightBodyGyro:Destroy()
+        HerbState.FlightBodyGyro = nil
     end
     
-    workspace.Gravity = State.OriginalGravity * 0.8
+    workspace.Gravity = HerbState.OriginalGravity * 0.8
 
-    local targetHeight = herb.Position.Y + CONFIG.NORMAL_HEIGHT_OFFSET
-    local targetPos = Vector3.new(herb.Position.X, targetHeight, herb.Position.Z)
+    local herbPos = getHerbPosition(herb)
+    local targetHeight = herbPos.Y + CONFIG.NORMAL_HEIGHT_OFFSET
+    local targetPos = Vector3.new(herbPos.X, targetHeight, herbPos.Z)
 
     local tweenCompleted = false
     local tween = TweenService:Create(
@@ -883,7 +762,7 @@ local function ascendToFlyHeight()
     print("[高度] 开始上升回飞行高度")
     
     humanoid.PlatformStand = true
-    workspace.Gravity = State.OriginalGravity * 0.1
+    workspace.Gravity = HerbState.OriginalGravity * 0.1
     
     local targetPos = Vector3.new(humanoidRootPart.Position.X, CONFIG.FLY_HEIGHT, humanoidRootPart.Position.Z)
 
@@ -907,11 +786,10 @@ local function ascendToFlyHeight()
     end
 
     enableFlight()
-    State.currentHerb = nil
+    HerbState.currentHerb = nil
     print("[高度] 已回到飞行高度")
 end
 
--- ===================== 采集等待与超时处理 =====================
 local function waitForPlayerCollect(herb)
     if not herb then 
         print("[采集] 草药不存在，终止等待")
@@ -922,22 +800,22 @@ local function waitForPlayerCollect(herb)
     local startTime = tick()
     local checkInterval = 0.2
 
-    while State.isRunning do
+    while HerbState.isRunning do
         if not herb:IsDescendantOf(Workspace) or not herb.Parent then
             print("[采集] 检测到草药已被采集")
-            State.collectedHerbs[herb] = true
-            State.herbAgeCache[herb] = nil
-            State.timeoutHerbs[herb] = nil
-            State.currentTimeoutCount = 0
-            State.retryAttempts = 0
+            HerbState.collectedHerbs[herb] = true
+            HerbState.herbAgeCache[herb] = nil
+            HerbState.timeoutHerbs[herb] = nil
+            HerbState.currentTimeoutCount = 0
+            HerbState.retryAttempts = 0
             return true
         end
 
         local elapsedTime = tick() - startTime
         if elapsedTime >= CONFIG.COLLECT_TIMEOUT then
             print("[采集] 采集超时（" .. CONFIG.COLLECT_TIMEOUT .. "秒未采集）")
-            State.timeoutHerbs[herb] = tick()
-            State.currentTimeoutCount = State.currentTimeoutCount + 1
+            HerbState.timeoutHerbs[herb] = tick()
+            HerbState.currentTimeoutCount = HerbState.currentTimeoutCount + 1
             print("[采集] 已将草药 " .. herb.Name .. " 加入超时列表（冷却时间：" .. CONFIG.TIMEOUT_COOLDOWN .. "秒）")
             return false
         end
@@ -949,329 +827,143 @@ local function waitForPlayerCollect(herb)
     return false
 end
 
--- ===================== 重生处理函数 =====================
-local function performRespawn()
-    print("[重生] 执行重生操作...")
-    
-    disableFlight()
-    State.isRunning = false
-    State.currentHerb = nil
-    
-    State.retryAttempts = 0
-    State.currentTimeoutCount = 0
-    State.collectedHerbs = {}
-    State.timeoutHerbs = {}
-    State.herbAgeCache = {}
-    State.failCount = 0
-    
-    if character and humanoid then
-        humanoid.Health = 0
+local function findAlternativeHerb(excludeHerb)
+    print("[寻找] 正在寻找替代草药...")
+    local allHerbs = scanHerbs()
+    if #allHerbs == 0 then 
+        print("[寻找] 未找到任何替代草药")
+        return nil 
     end
-    
-    local newChar = player.CharacterAdded:Wait()
-    character = newChar
-    humanoid = newChar:WaitForChild("Humanoid")
-    humanoidRootPart = newChar:WaitForChild("HumanoidRootPart")
-    
-    print("[重生] 角色重生完成，等待3秒后重新开始")
-    task.wait(3)
-    
-    if not State.isRunning then
-        State.isRunning = true
-        return true
-    end
-    
-    return false
-end
 
--- ===================== 草药条目创建函数（修复缩放问题） =====================
-local function createHerbEntry(parent, index, herbInfo)
-    local UI = CONFIG.UI_SCALE
-    local entryFrame = Instance.new("Frame")
-    entryFrame.Name = "HerbEntry_" .. index
-    entryFrame.Size = UDim2.new(1, -UI.PADDING_SMALL, 0, UI.HERB_ENTRY_HEIGHT)
-    entryFrame.Position = UDim2.new(0, UI.PADDING_SMALL/2, 0, (index-1) * UI.HERB_ENTRY_HEIGHT)
-    entryFrame.BackgroundTransparency = 0.5
-    entryFrame.BorderSizePixel = 0
+    local priorityHerbs, nonPriorityHerbs, hasPriority = filterHerbsByPriority(allHerbs)
     
-    -- 检查是否为优先级草药
-    local isPriority = false
-    local priorityNum = 0
-    for _, priorityHerb in ipairs(State.priorityHerbs) do
-        if priorityHerb.name == herbInfo.name then
-            isPriority = true
-            priorityNum = priorityHerb.priority
-            break
-        end
-    end
+    local herbInfoList = {}
+    local currentPos = excludeHerb and getHerbPosition(excludeHerb) or humanoidRootPart.Position
     
-    -- 设置背景颜色
-    if herbInfo.isCurrentTarget then
-        entryFrame.BackgroundColor3 = Color3.fromRGB(70, 130, 180)  -- 蓝色：当前目标
-    elseif isPriority then
-        if priorityNum == 1 then
-            entryFrame.BackgroundColor3 = Color3.fromRGB(220, 100, 50)  -- 橙色：优先级1
-        elseif priorityNum == 2 then
-            entryFrame.BackgroundColor3 = Color3.fromRGB(200, 150, 50)  -- 金色：优先级2
-        elseif priorityNum == 3 then
-            entryFrame.BackgroundColor3 = Color3.fromRGB(180, 180, 50)  -- 黄色：优先级3
-        else
-            entryFrame.BackgroundColor3 = Color3.fromRGB(80, 180, 80)   -- 绿色：其他优先级
-        end
-    else
-        entryFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 80)       -- 深灰色：非优先级
-    end
-    
-    -- 使用表格布局确保对齐
-    local layout = Instance.new("UIListLayout")
-    layout.FillDirection = Enum.FillDirection.Horizontal
-    layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
-    layout.VerticalAlignment = Enum.VerticalAlignment.Center
-    layout.SortOrder = Enum.SortOrder.LayoutOrder
-    layout.Padding = UDim.new(0, 2)
-    layout.Parent = entryFrame
-    
-    -- 排名标签
-    local rankLabel = Instance.new("TextLabel")
-    rankLabel.Name = "Rank"
-    rankLabel.Size = UDim2.new(0.12, 0, 1, 0)
-    rankLabel.LayoutOrder = 1
-    rankLabel.BackgroundTransparency = 1
-    rankLabel.Text = "#" .. index
-    rankLabel.TextColor3 = isPriority and Color3.fromRGB(255, 255, 100) or Color3.fromRGB(255, 215, 0)
-    rankLabel.Font = Enum.Font.SourceSansBold
-    rankLabel.TextSize = UI.SMALL_TEXT_SIZE
-    rankLabel.TextXAlignment = Enum.TextXAlignment.Center
-    
-    -- 名称标签
-    local nameLabel = Instance.new("TextLabel")
-    nameLabel.Name = "Name"
-    nameLabel.Size = UDim2.new(0.36, 0, 1, 0)
-    nameLabel.LayoutOrder = 2
-    nameLabel.BackgroundTransparency = 1
-    nameLabel.Text = herbInfo.name
-    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    nameLabel.Font = Enum.Font.SourceSans
-    nameLabel.TextSize = UI.SMALL_TEXT_SIZE
-    nameLabel.TextXAlignment = Enum.TextXAlignment.Left
-    nameLabel.TextTruncate = Enum.TextTruncate.AtEnd  -- 过长时截断
-    
-    -- 年份标签
-    local ageLabel = Instance.new("TextLabel")
-    ageLabel.Name = "Age"
-    ageLabel.Size = UDim2.new(0.22, 0, 1, 0)
-    ageLabel.LayoutOrder = 3
-    ageLabel.BackgroundTransparency = 1
-    ageLabel.Text = tostring(herbInfo.age)
-    ageLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-    ageLabel.Font = Enum.Font.SourceSansBold
-    ageLabel.TextSize = UI.SMALL_TEXT_SIZE
-    ageLabel.TextXAlignment = Enum.TextXAlignment.Center
-    
-    -- 距离标签
-    local distanceLabel = Instance.new("TextLabel")
-    distanceLabel.Name = "Distance"
-    distanceLabel.Size = UDim2.new(0.28, 0, 1, 0)
-    distanceLabel.LayoutOrder = 4
-    distanceLabel.BackgroundTransparency = 1
-    distanceLabel.Text = string.format("%.0fm", herbInfo.distance)
-    distanceLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-    distanceLabel.Font = Enum.Font.SourceSans
-    distanceLabel.TextSize = UI.SMALL_TEXT_SIZE
-    distanceLabel.TextXAlignment = Enum.TextXAlignment.Right
-    
-    rankLabel.Parent = entryFrame
-    nameLabel.Parent = entryFrame
-    ageLabel.Parent = entryFrame
-    distanceLabel.Parent = entryFrame
-    entryFrame.Parent = parent
-    
-    return entryFrame
-end
-
--- 获取所有草药的Age属性并排序
-local function updateTopHerbsList()
-    local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
-    if not herbsFolder then 
-        for _, child in ipairs(Workspace:GetChildren()) do
-            if child.Name:match("Herb") or child.Name:match("草药") then
-                herbsFolder = child
-                break
-            end
-        end
-        if not herbsFolder then
-            return {} 
-        end
-    end
-    
-    local allHerbs = {}
-    local currentTime = tick()
-    
-    -- 清理过期的超时记录
-    for herb, timeoutTime in pairs(State.timeoutHerbs) do
-        if currentTime - timeoutTime > CONFIG.TIMEOUT_COOLDOWN then
-            State.timeoutHerbs[herb] = nil
-        end
-    end
-    
-    -- 收集所有有效草药及其Age属性
-    for _, item in ipairs(herbsFolder:GetChildren()) do
-        if not item or not item.Parent then
-            continue
-        end
-        
-        local isValidType = item:IsA("MeshPart") or item:IsA("Part")
-        local isInWorkspace = item:IsDescendantOf(Workspace)
-        
-        -- 检查是否已采集
-        local isCollected = false
-        for collectedHerb, _ in pairs(State.collectedHerbs) do
-            if collectedHerb and collectedHerb == item then
-                isCollected = true
-                break
-            end
-        end
-        
-        -- 检查是否超时
-        local isTimedOut = false
-        for timeoutHerb, timeoutTime in pairs(State.timeoutHerbs) do
-            if timeoutHerb and timeoutHerb == item then
-                if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
-                    isTimedOut = true
+    if hasPriority and #priorityHerbs > 0 then
+        for _, priorityInfo in ipairs(priorityHerbs) do
+            local herb = priorityInfo.herb
+            local priority = priorityInfo.priority
+            
+            if herb and herb ~= excludeHerb and herb.Parent then
+                local isTimedOut = false
+                for timeoutHerb, timeoutTime in pairs(HerbState.timeoutHerbs) do
+                    if timeoutHerb and timeoutHerb == herb then
+                        if tick() - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
+                            isTimedOut = true
+                        end
+                        break
+                    end
                 end
-                break
+                
+                if not isTimedOut then
+                    local age = getHerbAge(herb)
+                    local herbPos = getHerbPosition(herb)
+                    local distance = (herbPos - currentPos).Magnitude
+                    
+                    table.insert(herbInfoList, {
+                        herb = herb,
+                        age = age,
+                        distance = distance,
+                        isPriority = true,
+                        priority = priority
+                    })
+                end
             end
-        end
-        
-        if isValidType and isInWorkspace and not isCollected and not isTimedOut then
-            local age = getHerbAge(item)
-            local distance = (item.Position - humanoidRootPart.Position).Magnitude
-            
-            -- 检查是否为优先级草药
-            local priority = getHerbPriority(item.Name)
-            
-            table.insert(allHerbs, {
-                herb = item,
-                name = item.Name,
-                age = age,
-                distance = distance,
-                position = item.Position,
-                isCurrentTarget = (item == State.currentHerb),
-                priority = priority
-            })
         end
     end
     
-    -- 排序逻辑：优先级草药按优先级排序，然后按年份从大到小排序
-    table.sort(allHerbs, function(a, b)
-        -- 如果a有优先级而b没有，a在前
-        if a.priority and not b.priority then
-            return true
-        elseif not a.priority and b.priority then
-            return false
-        elseif a.priority and b.priority then
-            -- 都有优先级，先按优先级数字排序（小的在前）
+    for _, herb in ipairs(nonPriorityHerbs) do
+        if herb and herb ~= excludeHerb and herb.Parent then
+            local isTimedOut = false
+            for timeoutHerb, timeoutTime in pairs(HerbState.timeoutHerbs) do
+                if timeoutHerb and timeoutHerb == herb then
+                    if tick() - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
+                        isTimedOut = true
+                    end
+                    break
+                end
+            end
+            
+            if not isTimedOut then
+                local age = getHerbAge(herb)
+                local herbPos = getHerbPosition(herb)
+                local distance = (herbPos - currentPos).Magnitude
+                
+                table.insert(herbInfoList, {
+                    herb = herb,
+                    age = age,
+                    distance = distance,
+                    isPriority = false
+                })
+            end
+        end
+    end
+    
+    if #herbInfoList == 0 then
+        print("[寻找] 没有其他可用的替代草药")
+        return nil
+    end
+    
+    table.sort(herbInfoList, function(a, b)
+        if a.isPriority and b.isPriority then
             if a.priority ~= b.priority then
                 return a.priority < b.priority
+            elseif a.age ~= b.age then
+                return a.age > b.age
+            else
+                return a.distance < b.distance
             end
-        end
-        
-        -- 优先级相同或都没有优先级，按年份从大到小排序
-        if a.age ~= b.age then
-            return a.age > b.age
+        elseif a.isPriority and not b.isPriority then
+            return true
+        elseif not a.isPriority and b.isPriority then
+            return false
         else
-            -- 年份相同，按距离从小到大排序
-            return a.distance < b.distance
+            if a.age ~= b.age then
+                return a.age > b.age
+            else
+                return a.distance < b.distance
+            end
         end
     end)
     
-    -- 只保留前N名
-    State.topHerbsList = {}
-    for i = 1, math.min(CONFIG.TOP_HERBS_COUNT, #allHerbs) do
-        table.insert(State.topHerbsList, allHerbs[i])
-    end
+    local bestAlternative = herbInfoList[1].herb
+    local bestAge = herbInfoList[1].age
+    local bestDistance = herbInfoList[1].distance
     
-    return State.topHerbsList
+    print(string.format("[寻找] 找到最佳替代草药: %s (年份: %d, 距离: %.1f米)", 
+        bestAlternative.Name, bestAge, bestDistance))
+    
+    return bestAlternative
 end
 
--- ===================== 更新年份前十草药UI（修复排版） =====================
-
-local function updateTopHerbsUI()
-    if not State.ControlUI or not State.ControlUI:FindFirstChild("MainFrame") then
-        return
-    end
+local function resetScanState()
+    print("[重置] 正在重置扫描状态...")
     
-    local mainFrame = State.ControlUI.MainFrame
-    local topHerbsFrame = mainFrame:FindFirstChild("TopHerbsFrame")
+    HerbState.collectedHerbs = {}
+    HerbState.timeoutHerbs = {}
+    HerbState.herbAgeCache = {}
     
-    if not topHerbsFrame then
-        return
-    end
-    
-    -- 更新年份前十的草药列表
-    local scrollFrame = topHerbsFrame:FindFirstChild("TopHerbsScroll")
-    if not scrollFrame then
-        return
-    end
-    
-    -- 清空现有条目
-    for _, child in ipairs(scrollFrame:GetChildren()) do
-        if child:IsA("Frame") and child.Name:match("^HerbEntry_") then
-            child:Destroy()
-        end
-    end
-    
-    -- 获取最新的前十草药列表
-    updateTopHerbsList()
-    
-    -- 创建新的条目
-    for i, herbInfo in ipairs(State.topHerbsList) do
-        createHerbEntry(scrollFrame, i, herbInfo)
-    end
-    
-    -- 更新滚动区域大小
-    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, #State.topHerbsList * CONFIG.UI_SCALE.HERB_ENTRY_HEIGHT)
-    
-    -- 更新计数
-    local countLabel = topHerbsFrame:FindFirstChild("CountLabel")
-    if countLabel then
-        countLabel.Text = "年份前十草药 (" .. #State.topHerbsList .. "/" .. CONFIG.TOP_HERBS_COUNT .. ")"
-    end
+    print("[重置] 扫描状态已重置")
 end
 
--- ===================== 主循环（修复超时后不前往下一个草药的问题） =====================
 local function mainLoop()
     print("[主流程] 启动，开始寻找草药...")
-    print("[主流程] 最大重试次数：" .. CONFIG.MAX_RETRY_ATTEMPTS)
     
-    if #State.priorityHerbs > 0 then
+    if #HerbState.priorityHerbs > 0 then
         print("[主流程] 优先级草药设置:")
-        for _, priorityHerb in ipairs(State.priorityHerbs) do
+        for _, priorityHerb in ipairs(HerbState.priorityHerbs) do
             print(string.format("  优先级%d: %s", priorityHerb.priority, priorityHerb.name))
         end
     else
         print("[主流程] 未设置优先级草药，将采集所有类型的草药")
     end
     
-    if CONFIG.ENABLE_BREAKTHROUGH then
-        print("[主流程] Breakthrough定时触发已启用（间隔: " .. CONFIG.BREAKTHROUGH_INTERVAL .. "秒）")
-    else
-        print("[主流程] Breakthrough定时触发已禁用")
-    end
-    
-    State.currentTimeoutCount = 0
-    State.failCount = 0
-    
-    local lastCleanupTime = tick()
+    HerbState.currentTimeoutCount = 0
+    HerbState.failCount = 0
 
-    while State.isRunning do
-        local currentTime = tick()
-        if currentTime - lastCleanupTime > 30 then
-            cleanupMemory()
-            lastCleanupTime = currentTime
-        end
-        
-        State.currentHerb = nil
+    while HerbState.isRunning do
+        HerbState.currentHerb = nil
         
         local bestHerb = findBestHerb()
         if not bestHerb then
@@ -1281,7 +973,7 @@ local function mainLoop()
             continue
         end
         
-        State.currentHerb = bestHerb
+        HerbState.currentHerb = bestHerb
         local priority = getHerbPriority(bestHerb.Name)
         print(string.format("[主流程] 选择草药：%s%s", bestHerb.Name, priority and " [优先级" .. priority .. "]" or ""))
 
@@ -1294,12 +986,12 @@ local function mainLoop()
             local alternativeHerb = findAlternativeHerb(bestHerb)
             if alternativeHerb then
                 print("[主流程] 找到替代草药：" .. alternativeHerb.Name)
-                State.currentHerb = alternativeHerb
+                HerbState.currentHerb = alternativeHerb
                 
                 local altReachSuccess = flyToHerb(alternativeHerb)
                 if not altReachSuccess then
                     print("[主流程] 替代草药也无法到达，继续寻找下一个...")
-                    if State.isRunning then
+                    if HerbState.isRunning then
                         ascendToFlyHeight()
                     end
                     task.wait(2)
@@ -1307,7 +999,7 @@ local function mainLoop()
                 end
             else
                 print("[主流程] 未找到替代草药，2秒后重新寻找")
-                if State.isRunning then
+                if HerbState.isRunning then
                     ascendToFlyHeight()
                 end
                 task.wait(2)
@@ -1315,24 +1007,24 @@ local function mainLoop()
             end
         end
 
-        local descendSuccess = descendToCollectHeight(State.currentHerb)
+        local descendSuccess = descendToCollectHeight(HerbState.currentHerb)
         if not descendSuccess then
             print("[主流程] 下降失败，寻找替代草药...")
             
-            local alternativeHerb = findAlternativeHerb(State.currentHerb)
+            local alternativeHerb = findAlternativeHerb(HerbState.currentHerb)
             if alternativeHerb then
                 print("[主流程] 找到替代草药：" .. alternativeHerb.Name)
-                State.currentHerb = alternativeHerb
+                HerbState.currentHerb = alternativeHerb
                 
                 print("[主流程] 重新前往替代草药...")
-                if State.isRunning then
+                if HerbState.isRunning then
                     ascendToFlyHeight()
                 end
                 task.wait(1)
                 continue
             else
                 print("[主流程] 未找到替代草药，2秒后重新寻找")
-                if State.isRunning then
+                if HerbState.isRunning then
                     ascendToFlyHeight()
                 end
                 task.wait(2)
@@ -1340,51 +1032,40 @@ local function mainLoop()
             end
         end
 
-        local collectSuccess = waitForPlayerCollect(State.currentHerb)
+        local collectSuccess = waitForPlayerCollect(HerbState.currentHerb)
         
         if collectSuccess then
             print("[主流程] 草药采集成功，准备下一个")
-            if State.isRunning then
+            if HerbState.isRunning then
                 ascendToFlyHeight()
             end
         else
-            print("[主流程] 采集超时，当前超时次数：" .. State.currentTimeoutCount)
+            print("[主流程] 采集超时，当前超时次数：" .. HerbState.currentTimeoutCount)
             
-            if State.currentTimeoutCount >= CONFIG.MAX_RETRY_ATTEMPTS then
+            if HerbState.currentTimeoutCount >= CONFIG.MAX_RETRY_ATTEMPTS then
                 print("[主流程] 达到最大超时次数（" .. CONFIG.MAX_RETRY_ATTEMPTS .. "），寻找替代草药...")
             end
             
-            -- 修复：确保在超时后寻找替代草药
-            local alternativeHerb = findAlternativeHerb(State.currentHerb)
+            local alternativeHerb = findAlternativeHerb(HerbState.currentHerb)
             if alternativeHerb then
                 print("[主流程] 切换到替代草药：" .. alternativeHerb.Name)
-                State.currentHerb = alternativeHerb
+                HerbState.currentHerb = alternativeHerb
                 
-                if State.isRunning then
-                    -- 修复：立即前往替代草药，而不是等待
+                if HerbState.isRunning then
                     print("[主流程] 立即前往替代草药...")
                     ascendToFlyHeight()
                 end
-                -- 修复：不等待，立即进入下一次循环前往替代草药
                 continue
             else
                 print("[主流程] 未找到替代草药")
                 
-                -- 检查是否应该重生
-                if State.currentTimeoutCount >= CONFIG.MAX_RETRY_ATTEMPTS then
-                    print("[主流程] 连续超时次数过多，执行重生")
-                    
-                    if performRespawn() then
-                        print("[主流程] 重生完成，重新开始循环")
-                        continue
-                    else
-                        print("[主流程] 重生失败，停止系统")
-                        State.isRunning = false
-                        break
-                    end
+                if HerbState.currentTimeoutCount >= CONFIG.MAX_RETRY_ATTEMPTS then
+                    print("[主流程] 连续超时次数过多，停止系统")
+                    HerbState.isRunning = false
+                    break
                 else
                     print("[主流程] 将在3秒后重新寻找草药")
-                    if State.isRunning then
+                    if HerbState.isRunning then
                         ascendToFlyHeight()
                     end
                     task.wait(3)
@@ -1397,114 +1078,145 @@ local function mainLoop()
     end
 
     disableFlight()
-    stopBreakthroughTimer()
-    State.currentHerb = nil
-    State.retryAttempts = 0
-    State.currentTimeoutCount = 0
-    State.failCount = 0
+    HerbState.currentHerb = nil
+    HerbState.retryAttempts = 0
+    HerbState.currentTimeoutCount = 0
+    HerbState.failCount = 0
     print("[主流程] 已停止")
 end
 
--- ===================== 系统启动/停止控制 =====================
-local function startSystem()
-    if State.isRunning then
+local function startHerbSystem()
+    if HerbState.isRunning then
         print("[系统] 系统已经在运行中")
         return false
     end
     
-    print("[系统] 正在启动系统...")
+    print("[系统] 正在启动草药系统...")
     
-    State.retryAttempts = 0
-    State.currentTimeoutCount = 0
-    State.collectedHerbs = {}
-    State.timeoutHerbs = {}
-    State.herbAgeCache = {}
-    State.failCount = 0
-    State.currentHerb = nil
-    State.IsFlying = false
+    HerbState.retryAttempts = 0
+    HerbState.currentTimeoutCount = 0
+    HerbState.collectedHerbs = {}
+    HerbState.timeoutHerbs = {}
+    HerbState.herbAgeCache = {}
+    HerbState.failCount = 0
+    HerbState.currentHerb = nil
+    HerbState.IsFlying = false
     
-    if State.FlightBodyVelocity then
-        State.FlightBodyVelocity:Destroy()
-        State.FlightBodyVelocity = nil
+    if HerbState.FlightBodyVelocity then
+        HerbState.FlightBodyVelocity:Destroy()
+        HerbState.FlightBodyVelocity = nil
     end
-    if State.FlightBodyGyro then
-        State.FlightBodyGyro:Destroy()
-        State.FlightBodyGyro = nil
+    if HerbState.FlightBodyGyro then
+        HerbState.FlightBodyGyro:Destroy()
+        HerbState.FlightBodyGyro = nil
     end
-    if State.FlightConnection then
-        State.FlightConnection:Disconnect()
-        State.FlightConnection = nil
-    end
-    
-    State.isRunning = true
-    
-    if State.uiUpdateConnection then
-        State.uiUpdateConnection:Disconnect()
-        State.uiUpdateConnection = nil
+    if HerbState.FlightConnection then
+        HerbState.FlightConnection:Disconnect()
+        HerbState.FlightConnection = nil
     end
     
-    State.lastUIUpdate = 0
-    State.uiUpdateConnection = RunService.Heartbeat:Connect(function()
-        local now = tick()
-        if not State.lastUIUpdate or now - State.lastUIUpdate >= CONFIG.UI_UPDATE_INTERVAL then
-            State.lastUIUpdate = now
-            if State.ControlUI and State.ControlUI:FindFirstChild("MainFrame") then
-                updateTopHerbsUI()
-            end
-        end
-    end)
+    HerbState.isRunning = true
     
-    if CONFIG.ENABLE_BREAKTHROUGH then
-        startBreakthroughTimer()
-    end
+    HerbState.mainLoopCoroutine = coroutine.create(mainLoop)
+    coroutine.resume(HerbState.mainLoopCoroutine)
     
-    State.mainLoopCoroutine = coroutine.create(mainLoop)
-    coroutine.resume(State.mainLoopCoroutine)
-    
-    print("[系统] 系统已成功启动")
+    print("[系统] 草药系统已成功启动")
     return true
 end
 
-local function stopSystem()
-    if not State.isRunning then
+local function stopHerbSystem()
+    if not HerbState.isRunning then
         print("[系统] 系统未在运行")
         return false
     end
     
-    print("[系统] 正在停止系统...")
+    print("[系统] 正在停止草药系统...")
     
-    State.isRunning = false
+    HerbState.isRunning = false
     
     disableFlight()
-    State.currentHerb = nil
+    HerbState.currentHerb = nil
     
-    if State.uiUpdateConnection then
-        State.uiUpdateConnection:Disconnect()
-        State.uiUpdateConnection = nil
+    if HerbState.mainLoopCoroutine and coroutine.status(HerbState.mainLoopCoroutine) ~= "dead" then
     end
+    HerbState.mainLoopCoroutine = nil
     
-    stopBreakthroughTimer()
-    
-    if State.mainLoopCoroutine and coroutine.status(State.mainLoopCoroutine) ~= "dead" then
-    end
-    State.mainLoopCoroutine = nil
-    
-    print("[系统] 系统已停止")
+    print("[系统] 草药系统已停止")
     return true
 end
 
--- ===================== 优先级选择UI（修复缩放问题） =====================
+-- ===================== 从ReplicatedStorage.Herbs加载草药类型 =====================
+local function loadHerbTypesFromReplicatedStorage()
+    local herbsList = {}
+    local seenNames = {}
+    
+    print("[草药列表] 从ReplicatedStorage.Herbs文件夹加载...")
+    
+    -- 从ReplicatedStorage.Herbs文件夹加载
+    local herbsFolder = ReplicatedStorage:FindFirstChild("Herbs")
+    if herbsFolder then
+        print("[草药列表] 找到ReplicatedStorage.Herbs文件夹")
+        
+        -- 遍历所有草药对象
+        for _, item in ipairs(herbsFolder:GetChildren()) do
+            if not item then continue end
+            
+            local herbName = item.Name
+            
+            -- 检查是否是草药对象
+            local isHerbObject = false
+            
+            -- 如果是Model，MeshPart或Part，都认为是草药
+            if item:IsA("Model") or item:IsA("MeshPart") or item:IsA("Part") then
+                isHerbObject = true
+            end
+            
+            if isHerbObject and not seenNames[herbName] then
+                table.insert(herbsList, herbName)
+                seenNames[herbName] = true
+                print("[草药列表] 添加草药: " .. herbName)
+            end
+        end
+    else
+        print("[草药列表] 未找到ReplicatedStorage.Herbs文件夹，使用默认列表")
+        herbsList = {
+            "Extreme Yin Growth",
+            "Extreme Yang Growth", 
+            "Yin Growth",
+            "Yang Growth",
+            "Spiritual Growth",
+            "Herbal Growth",
+            "Mystic Growth"
+        }
+    end
+    
+    table.sort(herbsList)
+    HerbState.availableHerbTypes = herbsList
+    
+    print("[草药列表] 已加载 " .. #herbsList .. " 种草药类型")
+    
+    -- 打印所有草药类型
+    for i, herbName in ipairs(herbsList) do
+        print(string.format("[草药列表] %d. %s", i, herbName))
+    end
+    
+    return herbsList
+end
+
+-- ===================== 优先级选择UI =====================
+local PriorityUI = nil
+
 local function createPrioritySelectionUI()
-    if State.PriorityUI then
-        State.PriorityUI:Destroy()
-        State.PriorityUI = nil
+    if PriorityUI then
+        PriorityUI:Destroy()
+        PriorityUI = nil
     end
     
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "PrioritySelectionUI"
     screenGui.ResetOnSpawn = false
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    screenGui.DisplayOrder = 10
+    screenGui.DisplayOrder = 20
     
     local UI = CONFIG.UI_SCALE
     
@@ -1512,7 +1224,7 @@ local function createPrioritySelectionUI()
     mainFrame.Name = "MainFrame"
     mainFrame.Size = UDim2.new(0, UI.PRIORITY_FRAME_WIDTH, 0, UI.PRIORITY_FRAME_HEIGHT)
     mainFrame.Position = UDim2.new(0.5, -UI.PRIORITY_FRAME_WIDTH/2, 0.5, -UI.PRIORITY_FRAME_HEIGHT/2)
-    mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
     mainFrame.BackgroundTransparency = 0.1
     mainFrame.BorderSizePixel = 0
     mainFrame.Active = true
@@ -1523,7 +1235,7 @@ local function createPrioritySelectionUI()
     titleLabel.Name = "Title"
     titleLabel.Size = UDim2.new(1, 0, 0, 40)
     titleLabel.Position = UDim2.new(0, 0, 0, 0)
-    titleLabel.BackgroundColor3 = Color3.fromRGB(40, 40, 70)
+    titleLabel.BackgroundColor3 = Color3.fromRGB(60, 60, 90)
     titleLabel.Text = "优先级草药选择"
     titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
     titleLabel.Font = Enum.Font.SourceSansBold
@@ -1533,10 +1245,10 @@ local function createPrioritySelectionUI()
     -- 说明
     local instructionLabel = Instance.new("TextLabel")
     instructionLabel.Name = "Instruction"
-    instructionLabel.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 60)
-    instructionLabel.Position = UDim2.new(0, UI.PADDING_SMALL, 0, 45)
+    instructionLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 50)
+    instructionLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 45)
     instructionLabel.BackgroundTransparency = 1
-    instructionLabel.Text = "选择您想要优先采摘的草药（最多" .. CONFIG.MAX_PRIORITY_HERBS .. "种）\n选择的顺序即为优先级顺序（第一个选择的优先级最高）\n不选择优先级草药则采集所有类型的草药"
+    instructionLabel.Text = "选择优先级草药（最多" .. CONFIG.MAX_PRIORITY_HERBS .. "种）\n选择的顺序即为优先级顺序"
     instructionLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
     instructionLabel.Font = Enum.Font.SourceSans
     instructionLabel.TextSize = UI.SMALL_TEXT_SIZE
@@ -1546,8 +1258,8 @@ local function createPrioritySelectionUI()
     -- 选择数量显示
     local selectionLabel = Instance.new("TextLabel")
     selectionLabel.Name = "SelectionLabel"
-    selectionLabel.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 25)
-    selectionLabel.Position = UDim2.new(0, UI.PADDING_SMALL, 0, 110)
+    selectionLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
+    selectionLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 100)
     selectionLabel.BackgroundTransparency = 1
     selectionLabel.Text = "已选择: 0/" .. CONFIG.MAX_PRIORITY_HERBS
     selectionLabel.TextColor3 = Color3.fromRGB(200, 255, 200)
@@ -1555,20 +1267,20 @@ local function createPrioritySelectionUI()
     selectionLabel.TextSize = UI.BODY_TEXT_SIZE
     selectionLabel.TextXAlignment = Enum.TextXAlignment.Left
     
-    -- 优先级列表
+    -- 优先级列表区域
     local priorityFrame = Instance.new("Frame")
     priorityFrame.Name = "PriorityFrame"
-    priorityFrame.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 100)
-    priorityFrame.Position = UDim2.new(0, UI.PADDING_SMALL, 0, 140)
-    priorityFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
+    priorityFrame.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 120)
+    priorityFrame.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 130)
+    priorityFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
     priorityFrame.BorderSizePixel = 0
     
     local priorityTitle = Instance.new("TextLabel")
     priorityTitle.Name = "PriorityTitle"
     priorityTitle.Size = UDim2.new(1, 0, 0, 25)
     priorityTitle.Position = UDim2.new(0, 0, 0, 0)
-    priorityTitle.BackgroundColor3 = Color3.fromRGB(50, 50, 80)
-    priorityTitle.Text = "优先级列表"
+    priorityTitle.BackgroundColor3 = Color3.fromRGB(70, 70, 100)
+    priorityTitle.Text = "优先级列表 (点击移除)"
     priorityTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
     priorityTitle.Font = Enum.Font.SourceSansBold
     priorityTitle.TextSize = UI.BODY_TEXT_SIZE
@@ -1580,23 +1292,23 @@ local function createPrioritySelectionUI()
     priorityScroll.Position = UDim2.new(0, 0, 0, 25)
     priorityScroll.BackgroundTransparency = 1
     priorityScroll.BorderSizePixel = 0
-    priorityScroll.ScrollBarThickness = 6
+    priorityScroll.ScrollBarThickness = 8
     priorityScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
     
-    -- 草药列表
+    -- 草药列表区域
     local herbsFrame = Instance.new("Frame")
     herbsFrame.Name = "HerbsFrame"
-    herbsFrame.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, UI.PRIORITY_SCROLL_HEIGHT)
-    herbsFrame.Position = UDim2.new(0, UI.PADDING_SMALL, 0, 245)
-    herbsFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
+    herbsFrame.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 200)
+    herbsFrame.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 255)
+    herbsFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
     herbsFrame.BorderSizePixel = 0
     
     local herbsTitle = Instance.new("TextLabel")
     herbsTitle.Name = "HerbsTitle"
     herbsTitle.Size = UDim2.new(1, 0, 0, 25)
     herbsTitle.Position = UDim2.new(0, 0, 0, 0)
-    herbsTitle.BackgroundColor3 = Color3.fromRGB(50, 50, 80)
-    herbsTitle.Text = "可用草药列表"
+    herbsTitle.BackgroundColor3 = Color3.fromRGB(70, 70, 100)
+    herbsTitle.Text = "草药列表 (点击选择)"
     herbsTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
     herbsTitle.Font = Enum.Font.SourceSansBold
     herbsTitle.TextSize = UI.BODY_TEXT_SIZE
@@ -1608,14 +1320,14 @@ local function createPrioritySelectionUI()
     herbsScroll.Position = UDim2.new(0, 0, 0, 25)
     herbsScroll.BackgroundTransparency = 1
     herbsScroll.BorderSizePixel = 0
-    herbsScroll.ScrollBarThickness = 6
+    herbsScroll.ScrollBarThickness = 8
     herbsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
     
     -- 按钮区域
     local buttonFrame = Instance.new("Frame")
     buttonFrame.Name = "ButtonFrame"
-    buttonFrame.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 50)
-    buttonFrame.Position = UDim2.new(0, UI.PADDING_SMALL, 0, UI.PRIORITY_FRAME_HEIGHT - 60)
+    buttonFrame.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 50)
+    buttonFrame.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, UI.PRIORITY_FRAME_HEIGHT - 60)
     buttonFrame.BackgroundTransparency = 1
     buttonFrame.BorderSizePixel = 0
     
@@ -1625,7 +1337,7 @@ local function createPrioritySelectionUI()
     confirmButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
     confirmButton.Position = UDim2.new(0.025, 0, 0, 5)
     confirmButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
-    confirmButton.Text = "确认选择"
+    confirmButton.Text = "确认"
     confirmButton.TextColor3 = Color3.fromRGB(255, 255, 255)
     confirmButton.Font = Enum.Font.SourceSansBold
     confirmButton.TextSize = UI.BUTTON_TEXT_SIZE
@@ -1653,6 +1365,7 @@ local function createPrioritySelectionUI()
     clearButton.TextSize = UI.SMALL_TEXT_SIZE
     clearButton.BorderSizePixel = 0
     
+    -- 状态管理
     local selectedHerbs = {}
     local selectedCount = 0
     
@@ -1668,11 +1381,12 @@ local function createPrioritySelectionUI()
     end
     
     local function createPriorityItem(index, herbName)
-        local itemFrame = Instance.new("Frame")
+        local itemFrame = Instance.new("TextButton")
         itemFrame.Name = "PriorityItem_" .. index
-        itemFrame.Size = UDim2.new(1, -10, 0, 32)
+        itemFrame.Size = UDim2.new(1, -10, 0, 30)
         itemFrame.Position = UDim2.new(0, 5, 0, (index-1) * 32)
-        itemFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 90)
+        itemFrame.BackgroundColor3 = Color3.fromRGB(70, 70, 100)
+        itemFrame.Text = ""
         itemFrame.BorderSizePixel = 0
         
         local layout = Instance.new("UIListLayout")
@@ -1680,12 +1394,12 @@ local function createPrioritySelectionUI()
         layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
         layout.VerticalAlignment = Enum.VerticalAlignment.Center
         layout.SortOrder = Enum.SortOrder.LayoutOrder
-        layout.Padding = UDim.new(0, 5)
+        layout.Padding = UDim.new(0, 8)
         layout.Parent = itemFrame
         
         local priorityLabel = Instance.new("TextLabel")
         priorityLabel.Name = "Priority"
-        priorityLabel.Size = UDim2.new(0, 35, 1, 0)
+        priorityLabel.Size = UDim2.new(0, 40, 1, 0)
         priorityLabel.LayoutOrder = 1
         priorityLabel.BackgroundTransparency = 1
         priorityLabel.Text = "#" .. index
@@ -1696,7 +1410,7 @@ local function createPrioritySelectionUI()
         
         local nameLabel = Instance.new("TextLabel")
         nameLabel.Name = "Name"
-        nameLabel.Size = UDim2.new(0.6, -40, 1, 0)
+        nameLabel.Size = UDim2.new(1, -50, 1, 0)
         nameLabel.LayoutOrder = 2
         nameLabel.BackgroundTransparency = 1
         nameLabel.Text = herbName
@@ -1706,18 +1420,7 @@ local function createPrioritySelectionUI()
         nameLabel.TextXAlignment = Enum.TextXAlignment.Left
         nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
         
-        local removeButton = Instance.new("TextButton")
-        removeButton.Name = "RemoveButton"
-        removeButton.Size = UDim2.new(0.3, 0, 0.7, 0)
-        removeButton.LayoutOrder = 3
-        removeButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-        removeButton.Text = "移除"
-        removeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-        removeButton.Font = Enum.Font.SourceSans
-        removeButton.TextSize = 12
-        removeButton.BorderSizePixel = 0
-        
-        removeButton.MouseButton1Click:Connect(function()
+        itemFrame.MouseButton1Click:Connect(function()
             for idx, name in ipairs(selectedHerbs) do
                 if name == herbName then
                     table.remove(selectedHerbs, idx)
@@ -1728,7 +1431,7 @@ local function createPrioritySelectionUI()
             
             -- 重新创建优先级列表
             for _, child in ipairs(priorityScroll:GetChildren()) do
-                if child:IsA("Frame") and child.Name:match("^PriorityItem_") then
+                if child:IsA("Frame") or child:IsA("TextButton") then
                     child:Destroy()
                 end
             end
@@ -1737,13 +1440,35 @@ local function createPrioritySelectionUI()
                 createPriorityItem(i, name)
             end
             
+            -- 重新创建草药列表以更新选择状态
+            for _, child in ipairs(herbsScroll:GetChildren()) do
+                if child:IsA("Frame") or child:IsA("TextButton") then
+                    local nameLabel = child:FindFirstChild("Name")
+                    if nameLabel then
+                        local isSelected = false
+                        for _, selectedName in ipairs(selectedHerbs) do
+                            if selectedName == nameLabel.Text then
+                                isSelected = true
+                                break
+                            end
+                        end
+                        
+                        local checkmark = child:FindFirstChild("Checkmark")
+                        if checkmark then
+                            checkmark.Visible = isSelected
+                        end
+                        
+                        child.BackgroundColor3 = isSelected and Color3.fromRGB(80, 120, 80) or Color3.fromRGB(60, 60, 80)
+                    end
+                end
+            end
+            
             updateSelectionDisplay()
             print("[优先级] 已移除草药: " .. herbName)
         end)
         
         priorityLabel.Parent = itemFrame
         nameLabel.Parent = itemFrame
-        removeButton.Parent = itemFrame
         itemFrame.Parent = priorityScroll
         
         return itemFrame
@@ -1751,7 +1476,7 @@ local function createPrioritySelectionUI()
     
     local function updatePriorityList()
         for _, child in ipairs(priorityScroll:GetChildren()) do
-            if child:IsA("Frame") and child.Name:match("^PriorityItem_") then
+            if child:IsA("Frame") or child:IsA("TextButton") then
                 child:Destroy()
             end
         end
@@ -1768,11 +1493,12 @@ local function createPrioritySelectionUI()
     local herbsList = loadHerbTypesFromReplicatedStorage()
     
     for i, herbName in ipairs(herbsList) do
-        local itemFrame = Instance.new("Frame")
+        local itemFrame = Instance.new("TextButton")
         itemFrame.Name = "HerbItem_" .. i
-        itemFrame.Size = UDim2.new(1, -10, 0, 40)
-        itemFrame.Position = UDim2.new(0, 5, 0, (i-1) * 40)
-        itemFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+        itemFrame.Size = UDim2.new(1, -10, 0, UI.HERB_ITEM_HEIGHT)
+        itemFrame.Position = UDim2.new(0, 5, 0, (i-1) * (UI.HERB_ITEM_HEIGHT + 2))
+        itemFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+        itemFrame.Text = ""
         itemFrame.BorderSizePixel = 0
         
         local layout = Instance.new("UIListLayout")
@@ -1783,12 +1509,11 @@ local function createPrioritySelectionUI()
         layout.Padding = UDim.new(0, 8)
         layout.Parent = itemFrame
         
-        local checkbox = Instance.new("TextButton")
+        local checkbox = Instance.new("Frame")
         checkbox.Name = "Checkbox"
-        checkbox.Size = UDim2.new(0, 30, 0, 30)
+        checkbox.Size = UDim2.new(0, 24, 0, 24)
         checkbox.LayoutOrder = 1
         checkbox.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
-        checkbox.Text = ""
         checkbox.BorderSizePixel = 0
         
         local checkmark = Instance.new("TextLabel")
@@ -1799,28 +1524,29 @@ local function createPrioritySelectionUI()
         checkmark.Text = "✓"
         checkmark.TextColor3 = Color3.fromRGB(100, 255, 100)
         checkmark.Font = Enum.Font.SourceSansBold
-        checkmark.TextSize = 20
+        checkmark.TextSize = 18
         checkmark.Visible = false
         
         local nameLabel = Instance.new("TextLabel")
         nameLabel.Name = "Name"
-        nameLabel.Size = UDim2.new(0.8, -40, 1, 0)
+        nameLabel.Size = UDim2.new(1, -30, 1, 0)
         nameLabel.LayoutOrder = 2
         nameLabel.BackgroundTransparency = 1
         nameLabel.Text = herbName
         nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
         nameLabel.Font = Enum.Font.SourceSans
-        nameLabel.TextSize = 16
+        nameLabel.TextSize = UI.BODY_TEXT_SIZE
         nameLabel.TextXAlignment = Enum.TextXAlignment.Left
-        
-        local isSelected = false
+        nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
         
         -- 检查是否已经选择
-        for _, priorityHerb in ipairs(State.priorityHerbs) do
+        local isSelected = false
+        for _, priorityHerb in ipairs(HerbState.priorityHerbs) do
             if priorityHerb.name == herbName then
                 isSelected = true
                 checkmark.Visible = true
-                checkbox.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+                itemFrame.BackgroundColor3 = Color3.fromRGB(80, 120, 80)
+                checkbox.BackgroundColor3 = Color3.fromRGB(100, 150, 100)
                 
                 table.insert(selectedHerbs, herbName)
                 selectedCount = selectedCount + 1
@@ -1828,10 +1554,11 @@ local function createPrioritySelectionUI()
             end
         end
         
-        checkbox.MouseButton1Click:Connect(function()
+        itemFrame.MouseButton1Click:Connect(function()
             if isSelected then
                 isSelected = false
                 checkmark.Visible = false
+                itemFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
                 checkbox.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
                 
                 for idx, name in ipairs(selectedHerbs) do
@@ -1851,7 +1578,8 @@ local function createPrioritySelectionUI()
                 
                 isSelected = true
                 checkmark.Visible = true
-                checkbox.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+                itemFrame.BackgroundColor3 = Color3.fromRGB(80, 120, 80)
+                checkbox.BackgroundColor3 = Color3.fromRGB(100, 150, 100)
                 
                 table.insert(selectedHerbs, herbName)
                 selectedCount = selectedCount + 1
@@ -1870,47 +1598,34 @@ local function createPrioritySelectionUI()
     end
     
     -- 更新滚动区域大小
-    herbsScroll.CanvasSize = UDim2.new(0, 0, 0, #herbsList * 40)
+    herbsScroll.CanvasSize = UDim2.new(0, 0, 0, #herbsList * (UI.HERB_ITEM_HEIGHT + 2))
     
     -- 按钮事件
     confirmButton.MouseButton1Click:Connect(function()
-        State.priorityHerbs = {}
+        HerbState.priorityHerbs = {}
         
         for i, herbName in ipairs(selectedHerbs) do
-            table.insert(State.priorityHerbs, {
+            table.insert(HerbState.priorityHerbs, {
                 name = herbName,
                 priority = i
             })
         end
         
-        print("[优先级] 已保存 " .. #State.priorityHerbs .. " 种优先级草药")
+        print("[优先级] 已保存 " .. #HerbState.priorityHerbs .. " 种优先级草药")
         
-        for _, priorityHerb in ipairs(State.priorityHerbs) do
+        for _, priorityHerb in ipairs(HerbState.priorityHerbs) do
             print(string.format("[优先级] 优先级%d: %s", priorityHerb.priority, priorityHerb.name))
         end
         
         screenGui:Destroy()
-        State.PriorityUI = nil
-        State.isPriorityUIOpen = false
-        
-        if State.ControlUI and State.ControlUI:FindFirstChild("MainFrame") then
-            local priorityLabel = State.ControlUI.MainFrame:FindFirstChild("PriorityLabel")
-            if priorityLabel then
-                if #State.priorityHerbs > 0 then
-                    priorityLabel.Text = string.format("优先级草药: %d种", #State.priorityHerbs)
-                    priorityLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-                else
-                    priorityLabel.Text = "优先级草药: 无 (采集所有草药)"
-                    priorityLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-                end
-            end
-        end
+        PriorityUI = nil
+        HerbState.isPriorityUIOpen = false
     end)
     
     cancelButton.MouseButton1Click:Connect(function()
         screenGui:Destroy()
-        State.PriorityUI = nil
-        State.isPriorityUIOpen = false
+        PriorityUI = nil
+        HerbState.isPriorityUIOpen = false
         print("[优先级] 已取消选择")
     end)
     
@@ -1919,7 +1634,8 @@ local function createPrioritySelectionUI()
         selectedCount = 0
         
         for _, child in ipairs(herbsScroll:GetChildren()) do
-            if child:IsA("Frame") and child.Name:match("^HerbItem_") then
+            if child:IsA("TextButton") then
+                child.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
                 local checkbox = child:FindFirstChild("Checkbox")
                 if checkbox then
                     checkbox.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
@@ -1959,18 +1675,27 @@ local function createPrioritySelectionUI()
     mainFrame.Parent = screenGui
     screenGui.Parent = player:WaitForChild("PlayerGui")
     
-    State.PriorityUI = screenGui
-    State.isPriorityUIOpen = true
+    PriorityUI = screenGui
+    HerbState.isPriorityUIOpen = true
     
     return screenGui
 end
 
--- ===================== 主控制UI（修复缩放问题） =====================
-local function createControlUI()
+-- ===================== 创建合并的主UI =====================
+local MainUI = nil
+local CurrentTab = "herb" -- 当前选中的标签
+
+local function createMainUI()
+    if MainUI then
+        MainUI:Destroy()
+        MainUI = nil
+    end
+    
     local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "HerbCollectorUI"
+    screenGui.Name = "HerbCultivationUI"
     screenGui.ResetOnSpawn = false
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screenGui.DisplayOrder = 10
     
     local UI = CONFIG.UI_SCALE
     
@@ -1978,7 +1703,7 @@ local function createControlUI()
     mainFrame.Name = "MainFrame"
     mainFrame.Size = UDim2.new(0, UI.MAIN_FRAME_WIDTH, 0, UI.MAIN_FRAME_HEIGHT)
     mainFrame.Position = UDim2.new(0.02, 0, 0.02, 0)
-    mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
     mainFrame.BackgroundTransparency = 0.1
     mainFrame.BorderSizePixel = 0
     mainFrame.Active = true
@@ -1988,209 +1713,258 @@ local function createControlUI()
     titleLabel.Name = "Title"
     titleLabel.Size = UDim2.new(1, 0, 0, 35)
     titleLabel.Position = UDim2.new(0, 0, 0, 0)
-    titleLabel.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
-    titleLabel.Text = "草药采集系统"
+    titleLabel.BackgroundColor3 = Color3.fromRGB(60, 60, 90)
+    titleLabel.Text = "草药与修炼系统"
     titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
     titleLabel.Font = Enum.Font.SourceSansBold
     titleLabel.TextSize = UI.TITLE_TEXT_SIZE
     titleLabel.BorderSizePixel = 0
     
-    local statusLabel = Instance.new("TextLabel")
-    statusLabel.Name = "Status"
-    statusLabel.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 25)
-    statusLabel.Position = UDim2.new(0, UI.PADDING_SMALL, 0, 40)
-    statusLabel.BackgroundTransparency = 1
-    statusLabel.Text = "状态: 停止"
-    statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-    statusLabel.Font = Enum.Font.SourceSans
-    statusLabel.TextSize = UI.SUBTITLE_TEXT_SIZE
-    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    -- 左侧标签区域
+    local tabFrame = Instance.new("Frame")
+    tabFrame.Name = "TabFrame"
+    tabFrame.Size = UDim2.new(0, UI.TAB_BUTTON_WIDTH + UI.PADDING_SMALL*2, 1, -35)
+    tabFrame.Position = UDim2.new(0, 0, 0, 35)
+    tabFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+    tabFrame.BorderSizePixel = 0
     
-    local targetLabel = Instance.new("TextLabel")
-    targetLabel.Name = "TargetLabel"
-    targetLabel.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 20)
-    targetLabel.Position = UDim2.new(0, UI.PADDING_SMALL, 0, 70)
-    targetLabel.BackgroundTransparency = 1
-    targetLabel.Text = "当前目标: 无"
-    targetLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
-    targetLabel.Font = Enum.Font.SourceSans
-    targetLabel.TextSize = UI.SMALL_TEXT_SIZE
-    targetLabel.TextXAlignment = Enum.TextXAlignment.Left
+    -- 右侧内容区域
+    local contentFrame = Instance.new("Frame")
+    contentFrame.Name = "ContentFrame"
+    contentFrame.Size = UDim2.new(1, -(UI.TAB_BUTTON_WIDTH + UI.PADDING_SMALL*2), 1, -35)
+    contentFrame.Position = UDim2.new(0, UI.TAB_BUTTON_WIDTH + UI.PADDING_SMALL*2, 0, 35)
+    contentFrame.BackgroundColor3 = Color3.fromRGB(45, 45, 65)
+    contentFrame.BorderSizePixel = 0
     
-    local breakthroughLabel = Instance.new("TextLabel")
-    breakthroughLabel.Name = "BreakthroughLabel"
-    breakthroughLabel.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 20)
-    breakthroughLabel.Position = UDim2.new(0, UI.PADDING_SMALL, 0, 95)
-    breakthroughLabel.BackgroundTransparency = 1
-    breakthroughLabel.Text = CONFIG.ENABLE_BREAKTHROUGH and "Breakthrough: 已启用" or "Breakthrough: 已禁用"
-    breakthroughLabel.TextColor3 = CONFIG.ENABLE_BREAKTHROUGH and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
-    breakthroughLabel.Font = Enum.Font.SourceSans
-    breakthroughLabel.TextSize = UI.SMALL_TEXT_SIZE
-    breakthroughLabel.TextXAlignment = Enum.TextXAlignment.Left
+    -- 草药采摘标签按钮
+    local herbTabButton = Instance.new("TextButton")
+    herbTabButton.Name = "HerbTabButton"
+    herbTabButton.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, UI.TAB_BUTTON_HEIGHT)
+    herbTabButton.Position = UDim2.new(0, UI.PADDING_SMALL, 0, UI.PADDING_SMALL)
+    herbTabButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
+    herbTabButton.Text = "草药采摘"
+    herbTabButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    herbTabButton.Font = Enum.Font.SourceSansBold
+    herbTabButton.TextSize = UI.BODY_TEXT_SIZE
+    herbTabButton.BorderSizePixel = 0
     
-    local priorityLabel = Instance.new("TextLabel")
-    priorityLabel.Name = "PriorityLabel"
-    priorityLabel.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 20)
-    priorityLabel.Position = UDim2.new(0, UI.PADDING_SMALL, 0, 120)
-    priorityLabel.BackgroundTransparency = 1
-    priorityLabel.Text = #State.priorityHerbs > 0 and string.format("优先级草药: %d种", #State.priorityHerbs) or "优先级草药: 无 (采集所有草药)"
-    priorityLabel.TextColor3 = #State.priorityHerbs > 0 and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(200, 200, 200)
-    priorityLabel.Font = Enum.Font.SourceSans
-    priorityLabel.TextSize = UI.SMALL_TEXT_SIZE
-    priorityLabel.TextXAlignment = Enum.TextXAlignment.Left
+    -- 修炼标签按钮
+    local cultTabButton = Instance.new("TextButton")
+    cultTabButton.Name = "CultTabButton"
+    cultTabButton.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, UI.TAB_BUTTON_HEIGHT)
+    cultTabButton.Position = UDim2.new(0, UI.PADDING_SMALL, 0, UI.TAB_BUTTON_HEIGHT + UI.PADDING_SMALL*2)
+    cultTabButton.BackgroundColor3 = Color3.fromRGB(60, 90, 60)
+    cultTabButton.Text = "修炼系统"
+    cultTabButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    cultTabButton.Font = Enum.Font.SourceSansBold
+    cultTabButton.TextSize = UI.BODY_TEXT_SIZE
+    cultTabButton.BorderSizePixel = 0
     
-    local priorityButton = Instance.new("TextButton")
-    priorityButton.Name = "PriorityButton"
-    priorityButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    priorityButton.Position = UDim2.new(0.025, 0, 0, 145)
-    priorityButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
-    priorityButton.Text = "设置优先级"
-    priorityButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    priorityButton.Font = Enum.Font.SourceSansBold
-    priorityButton.TextSize = UI.BUTTON_TEXT_SIZE
-    priorityButton.BorderSizePixel = 0
+    -- 关闭按钮
+    local closeButton = Instance.new("TextButton")
+    closeButton.Name = "CloseButton"
+    closeButton.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, 30)
+    closeButton.Position = UDim2.new(0, UI.PADDING_SMALL, 1, -35)
+    closeButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    closeButton.Text = "关闭界面"
+    closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeButton.Font = Enum.Font.SourceSans
+    closeButton.TextSize = UI.SMALL_TEXT_SIZE
+    closeButton.BorderSizePixel = 0
     
-    local breakthroughButton = Instance.new("TextButton")
-    breakthroughButton.Name = "BreakthroughButton"
-    breakthroughButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    breakthroughButton.Position = UDim2.new(0.525, 0, 0, 145)
-    breakthroughButton.BackgroundColor3 = CONFIG.ENABLE_BREAKTHROUGH and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(150, 50, 50)
-    breakthroughButton.Text = CONFIG.ENABLE_BREAKTHROUGH and "关闭Breakthrough" or "开启Breakthrough"
-    breakthroughButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    breakthroughButton.Font = Enum.Font.SourceSansBold
-    breakthroughButton.TextSize = UI.BUTTON_TEXT_SIZE
-    breakthroughButton.BorderSizePixel = 0
+    -- 草药采摘内容区域
+    local herbContentFrame = Instance.new("Frame")
+    herbContentFrame.Name = "HerbContentFrame"
+    herbContentFrame.Size = UDim2.new(1, 0, 1, 0)
+    herbContentFrame.Position = UDim2.new(0, 0, 0, 0)
+    herbContentFrame.BackgroundTransparency = 1
+    herbContentFrame.Visible = true
     
-    local toggleButton = Instance.new("TextButton")
-    toggleButton.Name = "ToggleButton"
-    toggleButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    toggleButton.Position = UDim2.new(0.025, 0, 0, 190)
-    toggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
-    toggleButton.Text = "启动系统"
-    toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    toggleButton.Font = Enum.Font.SourceSansBold
-    toggleButton.TextSize = UI.BUTTON_TEXT_SIZE
-    toggleButton.BorderSizePixel = 0
+    -- 修炼内容区域
+    local cultContentFrame = Instance.new("Frame")
+    cultContentFrame.Name = "CultContentFrame"
+    cultContentFrame.Size = UDim2.new(1, 0, 1, 0)
+    cultContentFrame.Position = UDim2.new(0, 0, 0, 0)
+    cultContentFrame.BackgroundTransparency = 1
+    cultContentFrame.Visible = false
     
-    local destroyButton = Instance.new("TextButton")
-    destroyButton.Name = "DestroyButton"
-    destroyButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    destroyButton.Position = UDim2.new(0.525, 0, 0, 190)
-    destroyButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-    destroyButton.Text = "销毁脚本"
-    destroyButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    destroyButton.Font = Enum.Font.SourceSans
-    destroyButton.TextSize = UI.BUTTON_TEXT_SIZE
-    destroyButton.BorderSizePixel = 0
+    -- ===================== 草药采摘内容 =====================
+    local herbStatusLabel = Instance.new("TextLabel")
+    herbStatusLabel.Name = "HerbStatusLabel"
+    herbStatusLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
+    herbStatusLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 10)
+    herbStatusLabel.BackgroundTransparency = 1
+    herbStatusLabel.Text = "状态: 停止"
+    herbStatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+    herbStatusLabel.Font = Enum.Font.SourceSans
+    herbStatusLabel.TextSize = UI.SUBTITLE_TEXT_SIZE
+    herbStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
     
-    local resetButton = Instance.new("TextButton")
-    resetButton.Name = "ResetButton"
-    resetButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    resetButton.Position = UDim2.new(0.025, 0, 0, 235)
-    resetButton.BackgroundColor3 = Color3.fromRGB(150, 150, 50)
-    resetButton.Text = "重置状态"
-    resetButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    resetButton.Font = Enum.Font.SourceSans
-    resetButton.TextSize = UI.BUTTON_TEXT_SIZE
-    resetButton.BorderSizePixel = 0
+    local herbTargetLabel = Instance.new("TextLabel")
+    herbTargetLabel.Name = "HerbTargetLabel"
+    herbTargetLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 20)
+    herbTargetLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 40)
+    herbTargetLabel.BackgroundTransparency = 1
+    herbTargetLabel.Text = "当前目标: 无"
+    herbTargetLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
+    herbTargetLabel.Font = Enum.Font.SourceSans
+    herbTargetLabel.TextSize = UI.SMALL_TEXT_SIZE
+    herbTargetLabel.TextXAlignment = Enum.TextXAlignment.Left
     
-    local topHerbsFrame = Instance.new("Frame")
-    topHerbsFrame.Name = "TopHerbsFrame"
-    topHerbsFrame.Size = UDim2.new(1, -UI.PADDING_SMALL*2, 0, UI.SCROLL_AREA_HEIGHT)
-    topHerbsFrame.Position = UDim2.new(0, UI.PADDING_SMALL, 0, 280)
-    topHerbsFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
-    topHerbsFrame.BackgroundTransparency = 0.1
-    topHerbsFrame.BorderSizePixel = 0
+    local herbPriorityLabel = Instance.new("TextLabel")
+    herbPriorityLabel.Name = "HerbPriorityLabel"
+    herbPriorityLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 20)
+    herbPriorityLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 65)
+    herbPriorityLabel.BackgroundTransparency = 1
+    herbPriorityLabel.Text = #HerbState.priorityHerbs > 0 and string.format("优先级草药: %d种", #HerbState.priorityHerbs) or "优先级草药: 无 (采集所有草药)"
+    herbPriorityLabel.TextColor3 = #HerbState.priorityHerbs > 0 and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(200, 200, 200)
+    herbPriorityLabel.Font = Enum.Font.SourceSans
+    herbPriorityLabel.TextSize = UI.SMALL_TEXT_SIZE
+    herbPriorityLabel.TextXAlignment = Enum.TextXAlignment.Left
     
-    local topHerbsTitle = Instance.new("TextLabel")
-    topHerbsTitle.Name = "TopHerbsTitle"
-    topHerbsTitle.Size = UDim2.new(1, 0, 0, 25)
-    topHerbsTitle.Position = UDim2.new(0, 0, 0, 0)
-    topHerbsTitle.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
-    topHerbsTitle.Text = "年份前十草药 (实时更新)"
-    topHerbsTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-    topHerbsTitle.Font = Enum.Font.SourceSansBold
-    topHerbsTitle.TextSize = UI.BODY_TEXT_SIZE
-    topHerbsTitle.BorderSizePixel = 0
+    local herbPriorityButton = Instance.new("TextButton")
+    herbPriorityButton.Name = "HerbPriorityButton"
+    herbPriorityButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
+    herbPriorityButton.Position = UDim2.new(0.025, 0, 0, 90)
+    herbPriorityButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
+    herbPriorityButton.Text = "设置优先级"
+    herbPriorityButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    herbPriorityButton.Font = Enum.Font.SourceSansBold
+    herbPriorityButton.TextSize = UI.BUTTON_TEXT_SIZE
+    herbPriorityButton.BorderSizePixel = 0
     
-    local countLabel = Instance.new("TextLabel")
-    countLabel.Name = "CountLabel"
-    countLabel.Size = UDim2.new(1, 0, 0, 18)
-    countLabel.Position = UDim2.new(0, 0, 0, 25)
-    countLabel.BackgroundTransparency = 1
-    countLabel.Text = "年份前十草药 (0/" .. CONFIG.TOP_HERBS_COUNT .. ")"
-    countLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
-    countLabel.Font = Enum.Font.SourceSans
-    countLabel.TextSize = UI.SMALL_TEXT_SIZE
-    countLabel.TextXAlignment = Enum.TextXAlignment.Center
+    local herbToggleButton = Instance.new("TextButton")
+    herbToggleButton.Name = "HerbToggleButton"
+    herbToggleButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
+    herbToggleButton.Position = UDim2.new(0.525, 0, 0, 90)
+    herbToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+    herbToggleButton.Text = "启动系统"
+    herbToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    herbToggleButton.Font = Enum.Font.SourceSansBold
+    herbToggleButton.TextSize = UI.BUTTON_TEXT_SIZE
+    herbToggleButton.BorderSizePixel = 0
     
-    local scrollFrame = Instance.new("ScrollingFrame")
-    scrollFrame.Name = "TopHerbsScroll"
-    scrollFrame.Size = UDim2.new(1, 0, 1, -48)
-    scrollFrame.Position = UDim2.new(0, 0, 0, 48)
-    scrollFrame.BackgroundTransparency = 1
-    scrollFrame.BorderSizePixel = 0
-    scrollFrame.ScrollBarThickness = 6
-    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    local herbResetButton = Instance.new("TextButton")
+    herbResetButton.Name = "HerbResetButton"
+    herbResetButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
+    herbResetButton.Position = UDim2.new(0.025, 0, 0, 135)
+    herbResetButton.BackgroundColor3 = Color3.fromRGB(150, 150, 50)
+    herbResetButton.Text = "重置状态"
+    herbResetButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    herbResetButton.Font = Enum.Font.SourceSans
+    herbResetButton.TextSize = UI.BUTTON_TEXT_SIZE
+    herbResetButton.BorderSizePixel = 0
     
-    local headerFrame = Instance.new("Frame")
-    headerFrame.Name = "HeaderFrame"
-    headerFrame.Size = UDim2.new(1, 0, 0, 25)
-    headerFrame.Position = UDim2.new(0, 0, 0, 0)
-    headerFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
-    headerFrame.BorderSizePixel = 0
+    local herbInfoLabel = Instance.new("TextLabel")
+    herbInfoLabel.Name = "HerbInfoLabel"
+    herbInfoLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 50)
+    herbInfoLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 1, -60)
+    herbInfoLabel.BackgroundTransparency = 1
+    herbInfoLabel.Text = "提示: 自动寻找并采集草药\n支持Model类型草药采集"
+    herbInfoLabel.TextColor3 = Color3.fromRGB(180, 180, 255)
+    herbInfoLabel.Font = Enum.Font.SourceSans
+    herbInfoLabel.TextSize = UI.SMALL_TEXT_SIZE
+    herbInfoLabel.TextWrapped = true
+    herbInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
     
-    -- 使用表格布局确保标题对齐
-    local headerLayout = Instance.new("UIListLayout")
-    headerLayout.FillDirection = Enum.FillDirection.Horizontal
-    headerLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
-    headerLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-    headerLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    headerLayout.Padding = UDim.new(0, 2)
-    headerLayout.Parent = headerFrame
+    -- ===================== 修炼内容 =====================
+    local cultStatusLabel = Instance.new("TextLabel")
+    cultStatusLabel.Name = "CultStatusLabel"
+    cultStatusLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
+    cultStatusLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 10)
+    cultStatusLabel.BackgroundTransparency = 1
+    cultStatusLabel.Text = "修炼状态: 未修炼"
+    cultStatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+    cultStatusLabel.Font = Enum.Font.SourceSans
+    cultStatusLabel.TextSize = UI.SUBTITLE_TEXT_SIZE
+    cultStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
     
-    -- 创建标题（与createHerbEntry中的宽度比例一致）
-    local headers = {
-        {text = "排名", width = 0.12, alignment = Enum.TextXAlignment.Center},
-        {text = "名称", width = 0.36, alignment = Enum.TextXAlignment.Left},
-        {text = "年份", width = 0.22, alignment = Enum.TextXAlignment.Center},
-        {text = "距离", width = 0.28, alignment = Enum.TextXAlignment.Right}
-    }
+    local cultBreakthroughLabel = Instance.new("TextLabel")
+    cultBreakthroughLabel.Name = "CultBreakthroughLabel"
+    cultBreakthroughLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
+    cultBreakthroughLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 40)
+    cultBreakthroughLabel.BackgroundTransparency = 1
+    cultBreakthroughLabel.Text = "自动突破: 关闭"
+    cultBreakthroughLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+    cultBreakthroughLabel.Font = Enum.Font.SourceSans
+    cultBreakthroughLabel.TextSize = UI.SUBTITLE_TEXT_SIZE
+    cultBreakthroughLabel.TextXAlignment = Enum.TextXAlignment.Left
     
-    for i, header in ipairs(headers) do
-        local headerLabel = Instance.new("TextLabel")
-        headerLabel.Name = "Header" .. i
-        headerLabel.Size = UDim2.new(header.width, 0, 1, 0)
-        headerLabel.LayoutOrder = i
-        headerLabel.BackgroundTransparency = 1
-        headerLabel.Text = header.text
-        headerLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
-        headerLabel.Font = Enum.Font.SourceSansBold
-        headerLabel.TextSize = UI.SMALL_TEXT_SIZE
-        headerLabel.TextXAlignment = header.alignment
-        headerLabel.Parent = headerFrame
+    local cultToggleButton = Instance.new("TextButton")
+    cultToggleButton.Name = "CultToggleButton"
+    cultToggleButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
+    cultToggleButton.Position = UDim2.new(0.025, 0, 0, 75)
+    cultToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+    cultToggleButton.Text = "开始修炼"
+    cultToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    cultToggleButton.Font = Enum.Font.SourceSansBold
+    cultToggleButton.TextSize = UI.BUTTON_TEXT_SIZE
+    cultToggleButton.BorderSizePixel = 0
+    
+    local cultBreakthroughButton = Instance.new("TextButton")
+    cultBreakthroughButton.Name = "CultBreakthroughButton"
+    cultBreakthroughButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
+    cultBreakthroughButton.Position = UDim2.new(0.525, 0, 0, 75)
+    cultBreakthroughButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+    cultBreakthroughButton.Text = "开启突破"
+    cultBreakthroughButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    cultBreakthroughButton.Font = Enum.Font.SourceSansBold
+    cultBreakthroughButton.TextSize = UI.BUTTON_TEXT_SIZE
+    cultBreakthroughButton.BorderSizePixel = 0
+    
+    local cultOnceButton = Instance.new("TextButton")
+    cultOnceButton.Name = "CultOnceButton"
+    cultOnceButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
+    cultOnceButton.Position = UDim2.new(0.025, 0, 0, 120)
+    cultOnceButton.BackgroundColor3 = Color3.fromRGB(150, 150, 50)
+    cultOnceButton.Text = "单次突破"
+    cultOnceButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    cultOnceButton.Font = Enum.Font.SourceSans
+    cultOnceButton.TextSize = UI.BUTTON_TEXT_SIZE
+    cultOnceButton.BorderSizePixel = 0
+    
+    local cultInfoLabel = Instance.new("TextLabel")
+    cultInfoLabel.Name = "CultInfoLabel"
+    cultInfoLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 50)
+    cultInfoLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 1, -60)
+    cultInfoLabel.BackgroundTransparency = 1
+    cultInfoLabel.Text = "提示: 修炼状态可自动突破\n每隔" .. CONFIG.BREAKTHROUGH_INTERVAL .. "秒自动突破一次"
+    cultInfoLabel.TextColor3 = Color3.fromRGB(180, 180, 255)
+    cultInfoLabel.Font = Enum.Font.SourceSans
+    cultInfoLabel.TextSize = UI.SMALL_TEXT_SIZE
+    cultInfoLabel.TextWrapped = true
+    cultInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
+    
+    -- 标签按钮事件
+    local function switchTab(tabName)
+        CurrentTab = tabName
+        
+        if tabName == "herb" then
+            herbTabButton.BackgroundColor3 = Color3.fromRGB(90, 90, 170)
+            cultTabButton.BackgroundColor3 = Color3.fromRGB(60, 90, 60)
+            
+            herbContentFrame.Visible = true
+            cultContentFrame.Visible = false
+        elseif tabName == "cult" then
+            herbTabButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
+            cultTabButton.BackgroundColor3 = Color3.fromRGB(80, 120, 80)
+            
+            herbContentFrame.Visible = false
+            cultContentFrame.Visible = true
+        end
     end
     
-    headerFrame.Parent = scrollFrame
-    topHerbsTitle.Parent = topHerbsFrame
-    countLabel.Parent = topHerbsFrame
-    scrollFrame.Parent = topHerbsFrame
+    herbTabButton.MouseButton1Click:Connect(function()
+        switchTab("herb")
+    end)
     
-    titleLabel.Parent = mainFrame
-    statusLabel.Parent = mainFrame
-    targetLabel.Parent = mainFrame
-    breakthroughLabel.Parent = mainFrame
-    priorityLabel.Parent = mainFrame
-    priorityButton.Parent = mainFrame
-    breakthroughButton.Parent = mainFrame
-    toggleButton.Parent = mainFrame
-    destroyButton.Parent = mainFrame
-    resetButton.Parent = mainFrame
-    topHerbsFrame.Parent = mainFrame
-    mainFrame.Parent = screenGui
+    cultTabButton.MouseButton1Click:Connect(function()
+        switchTab("cult")
+    end)
     
-    priorityButton.MouseButton1Click:Connect(function()
-        if not State.isPriorityUIOpen then
+    -- 草药采摘按钮事件
+    herbPriorityButton.MouseButton1Click:Connect(function()
+        if not HerbState.isPriorityUIOpen then
             print("[UI] 打开优先级选择界面")
             createPrioritySelectionUI()
         else
@@ -2198,134 +1972,221 @@ local function createControlUI()
         end
     end)
     
-    breakthroughButton.MouseButton1Click:Connect(function()
-        CONFIG.ENABLE_BREAKTHROUGH = not CONFIG.ENABLE_BREAKTHROUGH
-        
-        if CONFIG.ENABLE_BREAKTHROUGH then
-            breakthroughButton.Text = "关闭Breakthrough"
-            breakthroughButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
-            breakthroughLabel.Text = "Breakthrough: 已启用"
-            breakthroughLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-            print("[Breakthrough] 已启用")
-            
-            if State.isRunning then
-                startBreakthroughTimer()
-            end
-        else
-            breakthroughButton.Text = "开启Breakthrough"
-            breakthroughButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
-            breakthroughLabel.Text = "Breakthrough: 已禁用"
-            breakthroughLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-            print("[Breakthrough] 已禁用")
-            
-            stopBreakthroughTimer()
-        end
-    end)
-    
-    toggleButton.MouseButton1Click:Connect(function()
-        if State.isPriorityUIOpen then
+    herbToggleButton.MouseButton1Click:Connect(function()
+        if HerbState.isPriorityUIOpen then
             print("[UI] 请先关闭优先级选择界面")
             return
         end
         
-        if State.isRunning then
-            stopSystem()
-            statusLabel.Text = "状态: 停止"
-            statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-            toggleButton.Text = "启动系统"
-            toggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
-            targetLabel.Text = "当前目标: 无"
+        if HerbState.isRunning then
+            stopHerbSystem()
+            herbStatusLabel.Text = "状态: 停止"
+            herbStatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            herbToggleButton.Text = "启动系统"
+            herbToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+            herbTargetLabel.Text = "当前目标: 无"
         else
-            if startSystem() then
-                statusLabel.Text = "状态: 运行中"
-                statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-                toggleButton.Text = "停止系统"
-                toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+            if startHerbSystem() then
+                herbStatusLabel.Text = "状态: 运行中"
+                herbStatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+                herbToggleButton.Text = "停止系统"
+                herbToggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
             else
-                statusLabel.Text = "状态: 启动失败"
-                statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                herbStatusLabel.Text = "状态: 启动失败"
+                herbStatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
             end
         end
     end)
     
-    destroyButton.MouseButton1Click:Connect(function()
-        print("[UI] 销毁脚本")
-        
-        stopSystem()
-        
-        if State.PriorityUI then
-            State.PriorityUI:Destroy()
-            State.PriorityUI = nil
-        end
-        
-        screenGui:Destroy()
-        State.ControlUI = nil
-        
-        State.isRunning = false
-        disableFlight()
-    end)
-    
-    resetButton.MouseButton1Click:Connect(function()
+    herbResetButton.MouseButton1Click:Connect(function()
         print("[UI] 重置扫描状态")
         resetScanState()
     end)
     
+    -- 修炼按钮事件
+    cultToggleButton.MouseButton1Click:Connect(function()
+        local newState = toggleCultivation()
+        
+        if newState then
+            cultStatusLabel.Text = "修炼状态: 修炼中"
+            cultStatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+            cultToggleButton.Text = "停止修炼"
+            cultToggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        else
+            cultStatusLabel.Text = "修炼状态: 未修炼"
+            cultStatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            cultToggleButton.Text = "开始修炼"
+            cultToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+            
+            if CultState.isAutoBreakthrough then
+                stopAutoBreakthrough()
+                cultBreakthroughLabel.Text = "自动突破: 关闭"
+                cultBreakthroughLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                cultBreakthroughButton.Text = "开启突破"
+                cultBreakthroughButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+            end
+        end
+    end)
+    
+    cultBreakthroughButton.MouseButton1Click:Connect(function()
+        if not CultState.isCultivating then
+            print("[突破] 请先开始修炼")
+            return
+        end
+        
+        if CultState.isAutoBreakthrough then
+            stopAutoBreakthrough()
+            cultBreakthroughLabel.Text = "自动突破: 关闭"
+            cultBreakthroughLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            cultBreakthroughButton.Text = "开启突破"
+            cultBreakthroughButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+        else
+            startAutoBreakthrough()
+            cultBreakthroughLabel.Text = "自动突破: 开启"
+            cultBreakthroughLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+            cultBreakthroughButton.Text = "关闭突破"
+            cultBreakthroughButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+        end
+    end)
+    
+    cultOnceButton.MouseButton1Click:Connect(function()
+        if not CultState.isCultivating then
+            print("[突破] 请先开始修炼")
+            return
+        end
+        
+        breakthroughOnce()
+    end)
+    
+    closeButton.MouseButton1Click:Connect(function()
+        print("[UI] 关闭主界面")
+        screenGui.Enabled = false
+        
+        -- 如果移动设备，显示打开按钮
+        if MobileToggleButton then
+            MobileToggleButton.Visible = true
+        end
+    end)
+    
+    -- 更新UI的函数
     local function updateUI()
         if not screenGui or not screenGui.Parent then return end
         
-        if State.currentHerb and State.currentHerb.Parent then
-            local age = getHerbAge(State.currentHerb)
-            local priority = getHerbPriority(State.currentHerb.Name)
+        -- 草药采摘UI更新
+        if HerbState.currentHerb and HerbState.currentHerb.Parent then
+            local age = getHerbAge(HerbState.currentHerb)
+            local priority = getHerbPriority(HerbState.currentHerb.Name)
             local priorityText = priority and string.format(" [优先级%d]", priority) or ""
-            targetLabel.Text = string.format("当前目标: %s (年份: %d)%s", State.currentHerb.Name, age, priorityText)
-            targetLabel.TextColor3 = priority and Color3.fromRGB(255, 215, 0) or Color3.fromRGB(100, 255, 100)
+            herbTargetLabel.Text = string.format("当前目标: %s (年份: %d)%s", HerbState.currentHerb.Name, age, priorityText)
+            herbTargetLabel.TextColor3 = priority and Color3.fromRGB(255, 215, 0) or Color3.fromRGB(100, 255, 100)
         else
-            targetLabel.Text = "当前目标: 无"
-            targetLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
+            herbTargetLabel.Text = "当前目标: 无"
+            herbTargetLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
         end
         
-        if breakthroughLabel then
-            breakthroughLabel.Text = CONFIG.ENABLE_BREAKTHROUGH and "Breakthrough: 已启用" or "Breakthrough: 已禁用"
-            breakthroughLabel.TextColor3 = CONFIG.ENABLE_BREAKTHROUGH and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
-        end
-        
-        if statusLabel then
-            if State.isRunning then
-                statusLabel.Text = "状态: 运行中"
-                statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-                toggleButton.Text = "停止系统"
-                toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        if herbStatusLabel then
+            if HerbState.isRunning then
+                herbStatusLabel.Text = "状态: 运行中"
+                herbStatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+                herbToggleButton.Text = "停止系统"
+                herbToggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
             else
-                statusLabel.Text = "状态: 停止"
-                statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-                toggleButton.Text = "启动系统"
-                toggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+                herbStatusLabel.Text = "状态: 停止"
+                herbStatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                herbToggleButton.Text = "启动系统"
+                herbToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
             end
         end
         
-        if priorityLabel then
-            if #State.priorityHerbs > 0 then
-                local priorityText = "优先级草药: "
-                for i, priorityHerb in ipairs(State.priorityHerbs) do
-                    if i <= 3 then
-                        priorityText = priorityText .. string.format("%s%s(P%d)", i > 1 and ", " or "", priorityHerb.name, priorityHerb.priority)
-                    end
-                end
-                if #State.priorityHerbs > 3 then
-                    priorityText = priorityText .. string.format("...等%d种", #State.priorityHerbs)
-                end
-                priorityLabel.Text = priorityText
-                priorityLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+        if herbPriorityLabel then
+            if #HerbState.priorityHerbs > 0 then
+                herbPriorityLabel.Text = string.format("优先级草药: %d种", #HerbState.priorityHerbs)
+                herbPriorityLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
             else
-                priorityLabel.Text = "优先级草药: 无 (采集所有草药)"
-                priorityLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+                herbPriorityLabel.Text = "优先级草药: 无 (采集所有草药)"
+                herbPriorityLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+            end
+        end
+        
+        -- 修炼UI更新
+        if cultStatusLabel then
+            if CultState.isCultivating then
+                cultStatusLabel.Text = "修炼状态: 修炼中"
+                cultStatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+                cultToggleButton.Text = "停止修炼"
+                cultToggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+            else
+                cultStatusLabel.Text = "修炼状态: 未修炼"
+                cultStatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                cultToggleButton.Text = "开始修炼"
+                cultToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+            end
+        end
+        
+        if cultBreakthroughLabel then
+            if CultState.isAutoBreakthrough then
+                cultBreakthroughLabel.Text = "自动突破: 开启"
+                cultBreakthroughLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+                cultBreakthroughButton.Text = "关闭突破"
+                cultBreakthroughButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+            else
+                cultBreakthroughLabel.Text = "自动突破: 关闭"
+                cultBreakthroughLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                cultBreakthroughButton.Text = "开启突破"
+                cultBreakthroughButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
             end
         end
     end
     
+    -- 组装UI
+    titleLabel.Parent = mainFrame
+    tabFrame.Parent = mainFrame
+    contentFrame.Parent = mainFrame
+    
+    herbTabButton.Parent = tabFrame
+    cultTabButton.Parent = tabFrame
+    closeButton.Parent = tabFrame
+    
+    herbContentFrame.Parent = contentFrame
+    cultContentFrame.Parent = contentFrame
+    
+    herbStatusLabel.Parent = herbContentFrame
+    herbTargetLabel.Parent = herbContentFrame
+    herbPriorityLabel.Parent = herbContentFrame
+    herbPriorityButton.Parent = herbContentFrame
+    herbToggleButton.Parent = herbContentFrame
+    herbResetButton.Parent = herbContentFrame
+    herbInfoLabel.Parent = herbContentFrame
+    
+    cultStatusLabel.Parent = cultContentFrame
+    cultBreakthroughLabel.Parent = cultContentFrame
+    cultToggleButton.Parent = cultContentFrame
+    cultBreakthroughButton.Parent = cultContentFrame
+    cultOnceButton.Parent = cultContentFrame
+    cultInfoLabel.Parent = cultContentFrame
+    
+    mainFrame.Parent = screenGui
+    
+    -- 移动设备适配
+    if not UserInputService.KeyboardEnabled then
+        screenGui.Enabled = false
+        if MobileToggleButton then
+            MobileToggleButton.Visible = true
+            MobileToggleButton.MouseButton1Click:Connect(function()
+                screenGui.Enabled = not screenGui.Enabled
+                MobileToggleButton.Visible = not screenGui.Enabled
+            end)
+        end
+    end
+    
+    screenGui.Parent = player:WaitForChild("PlayerGui")
+    
+    MainUI = screenGui
+    
+    -- 定期更新UI
     local uiUpdateConnection
     uiUpdateConnection = RunService.Heartbeat:Connect(function()
-        if screenGui and screenGui.Parent then
+        if screenGui and screenGui.Parent and screenGui.Enabled then
             updateUI()
         else
             if uiUpdateConnection then
@@ -2334,78 +2195,77 @@ local function createControlUI()
         end
     end)
     
-    screenGui.Parent = player:WaitForChild("PlayerGui")
-    State.ControlUI = screenGui
-    
-    updateTopHerbsUI()
-    
     return screenGui
 end
 
--- ===================== 创建主控制UI =====================
-createControlUI()
+-- ===================== 主初始化 =====================
+print("=== 草药与修炼合并系统 ===")
+print("版本: 移动端适配优化版")
+print("主要功能:")
+print("1. 合并UI: 左侧标签右侧功能")
+print("2. 从ReplicatedStorage.Herbs加载草药类型")
+print("3. 移动设备适配")
+print("4. 重生后3秒自动重启草药系统")
 
--- ===================== 重生处理 =====================
+-- 预加载草药类型
+loadHerbTypesFromReplicatedStorage()
+
+-- 创建移动端开关
+createMobileToggle()
+
+-- 创建主UI
+createMainUI()
+
+print("系统已启动:")
+print("- 主界面: 屏幕左上角")
+print("- 移动设备: 左侧有打开/关闭按钮")
+print("- 草药采摘和修炼功能已合并")
+
+-- ===================== 角色重生处理 =====================
+local wasHerbRunningBeforeDeath = false
+
 player.CharacterAdded:Connect(function(newChar)
     print("[重生] 角色重生，重置所有状态")
+    
+    -- 记录重生前的草药系统状态
+    wasHerbRunningBeforeDeath = HerbState.isRunning
+    
+    -- 更新角色引用
     character = newChar
     humanoid = newChar:WaitForChild("Humanoid")
     humanoidRootPart = newChar:WaitForChild("HumanoidRootPart")
-
-    State.isRunning = false
-    State.currentHerb = nil
-    State.retryAttempts = 0
-    State.currentTimeoutCount = 0
-    State.collectedHerbs = {}
-    State.timeoutHerbs = {}
-    State.herbAgeCache = {}
-    State.failCount = 0
-    State.IsFlying = false
+    
+    -- 停止所有系统
+    stopHerbSystem()
+    HerbState.currentHerb = nil
+    HerbState.IsFlying = false
     disableFlight()
     
-    if State.uiUpdateConnection then
-        State.uiUpdateConnection:Disconnect()
-        State.uiUpdateConnection = nil
+    -- 重置修炼状态
+    if CultState.isCultivating then
+        toggleCultivation()
+    end
+    if CultState.isAutoBreakthrough then
+        stopAutoBreakthrough()
     end
     
-    stopBreakthroughTimer()
+    -- 等待3秒后自动重启草药系统（如果之前是开启的）
+    task.wait(3)
     
-    -- 等待1秒后自动启动脚本
+    if wasHerbRunningBeforeDeath then
+        print("[重生] 自动重启草药系统...")
+        startHerbSystem()
+    end
+    
+    -- 重新创建UI
     task.wait(1)
     
-    if State.ControlUI and State.ControlUI:FindFirstChild("MainFrame") then
-        local statusLabel = State.ControlUI.MainFrame.Status
-        statusLabel.Text = "状态: 停止 (已重生)"
-        
-        -- 自动启动系统
-        if startSystem() then
-            statusLabel.Text = "状态: 运行中"
-            statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-            
-            local toggleButton = State.ControlUI.MainFrame:FindFirstChild("ToggleButton")
-            if toggleButton then
-                toggleButton.Text = "停止系统"
-                toggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-            end
-        else
-            statusLabel.Text = "状态: 启动失败"
-            statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-        end
-    else
-        -- 如果UI不存在，重新创建并启动
-        createControlUI()
-        task.wait(0.5)
-        startSystem()
+    if MainUI then
+        MainUI:Destroy()
+        MainUI = nil
     end
+    
+    createMainUI()
+    
+    print("[重生] 系统已重置")
 end)
-
-print("=== 草药采集系统 (多优先级+Breakthrough) 修复版 ===")
-print("修复内容：")
-print("1. 修复了'priority is not a valid member of Part'错误 - 不再直接访问herb.priority")
-print("2. 修复了超时后不前往下一个草药的问题 - 现在超时后会立即寻找并前往替代草药")
-print("3. 修复了年份前十草药列表的缩放问题")
-print("4. 修复了优先级草药列表的缩放问题")
-print("5. 优先级寻找逻辑：优先考虑年份（年龄），年份相同再考虑距离")
-print("系统已启动，可在屏幕左上角查看控制界面")
-
-
