@@ -479,6 +479,136 @@ local function getHerbPriority(herbName)
     return nil
 end
 
+-- ===================== 修复：增强的获取位置函数 =====================
+local function getHerbPosition(herb)
+    if not herb or not herb.Parent then
+        warn("[坐标] 对象不存在或已销毁")
+        return Vector3.new(0, 0, 0)
+    end
+    
+    -- 方法1: 对于 BasePart，直接返回 Position
+    if herb:IsA("BasePart") then
+        return herb.Position
+    end
+    
+    -- 方法2: 对于 Model，尝试多种方式
+    if herb:IsA("Model") then
+        -- 2.1 检查 PrimaryPart
+        if herb.PrimaryPart and herb.PrimaryPart:IsA("BasePart") then
+            return herb.PrimaryPart.Position
+        end
+        
+        -- 2.2 尝试 GetPivot() 方法
+        local success, pivotResult = pcall(function()
+            return herb:GetPivot()
+        end)
+        
+        if success and pivotResult then
+            if typeof(pivotResult) == "CFrame" then
+                return pivotResult.Position
+            elseif typeof(pivotResult) == "Vector3" then
+                return pivotResult
+            end
+        end
+        
+        -- 2.3 检查 Pivot 子对象
+        local pivot = herb:FindFirstChild("Pivot")
+        if pivot then
+            -- Pivot 可能是 BasePart
+            if pivot:IsA("BasePart") then
+                return pivot.Position
+            end
+            
+            -- Pivot 可能有 WorldPivot 子对象
+            local worldPivot = pivot:FindFirstChild("WorldPivot")
+            if worldPivot then
+                if worldPivot:IsA("CFrameValue") then
+                    return worldPivot.Value.Position
+                elseif worldPivot:IsA("Vector3Value") then
+                    return worldPivot.Value
+                end
+            end
+        end
+        
+        -- 2.4 尝试 GetBoundingBox() 获取中心点
+        local success2, boundingBox = pcall(function()
+            return herb:GetBoundingBox()
+        end)
+        
+        if success2 and boundingBox then
+            return boundingBox.Position
+        end
+        
+        -- 2.5 查找任何 BasePart 子对象
+        for _, child in ipairs(herb:GetChildren()) do
+            if child:IsA("BasePart") then
+                return child.Position
+            end
+        end
+        
+        -- 2.6 深度搜索 BasePart
+        for _, descendant in ipairs(herb:GetDescendants()) do
+            if descendant:IsA("BasePart") then
+                return descendant.Position
+            end
+        end
+    end
+    
+    -- 方法3: 尝试通用属性
+    local success3, result = pcall(function()
+        if herb:IsA("BasePart") then
+            return herb.Position
+        elseif herb:FindFirstChild("Position") then
+            local posValue = herb.Position
+            if typeof(posValue) == "Vector3" then
+                return posValue
+            end
+        end
+        
+        -- 尝试获取 CFrame
+        local cframe = herb.CFrame
+        if cframe then
+            return cframe.Position
+        end
+        
+        return nil
+    end)
+    
+    if success3 and result then
+        return result
+    end
+    
+    -- 方法4: 最后尝试使用模型的 PrimaryPart 或第一个部件
+    if herb:IsA("Model") then
+        -- 再次尝试获取 PrimaryPart
+        if herb.PrimaryPart then
+            local success4, pos = pcall(function()
+                return herb.PrimaryPart.Position
+            end)
+            
+            if success4 then
+                return pos
+            end
+        end
+        
+        -- 查找任何部件
+        for _, child in pairs(herb:GetChildren()) do
+            if child:IsA("BasePart") then
+                local success5, pos = pcall(function()
+                    return child.Position
+                end)
+                
+                if success5 then
+                    return pos
+                end
+            end
+        end
+    end
+    
+    warn("[坐标] 无法获取对象位置: " .. herb.Name .. " (类型: " .. herb.ClassName .. ")")
+    return Vector3.new(0, 0, 0)
+end
+
 local function scanHerbs()
     local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
     if not herbsFolder then 
@@ -603,39 +733,20 @@ local function filterHerbsByPriority(herbs)
         if herb and herb.Parent then
             local priority = priorityMap[herb.Name]
             if priority then
-                table.insert(priorityHerbs, {
-                    herb = herb,
-                    priority = priority
-                })
+                table.insert(priorityHerbs, {herb = herb, priority = priority})
             else
                 table.insert(nonPriorityHerbs, herb)
             end
         end
     end
     
-    return priorityHerbs, nonPriorityHerbs, true
-end
-
-local function getHerbPosition(herb)
-    if not herb then
-        return Vector3.new(0, 0, 0)
+    -- 将priorityHerbs转换为带有priority信息的列表
+    local formattedPriorityHerbs = {}
+    for _, info in ipairs(priorityHerbs) do
+        table.insert(formattedPriorityHerbs, info)
     end
     
-    if herb:IsA("Model") then
-        if herb.PrimaryPart then
-            return herb.PrimaryPart.Position
-        else
-            -- 尝试找到第一个Part的位置
-            for _, child in ipairs(herb:GetChildren()) do
-                if child:IsA("BasePart") then
-                    return child.Position
-                end
-            end
-        end
-    end
-    
-    -- 默认情况
-    return herb.Position
+    return formattedPriorityHerbs, nonPriorityHerbs, true
 end
 
 local function findBestTarget()
@@ -2518,7 +2629,6 @@ local function createPillUI()
     
     return screenGui
 end
-
 
 -- ===================== 创建主UI =====================
 local MainUI = nil
