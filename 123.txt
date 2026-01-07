@@ -23,7 +23,7 @@ local CONFIG = {
     FLY_HEIGHT = 750,
     NORMAL_HEIGHT_OFFSET = 5,
     FLY_SPEED = 90,
-    MOVE_TIMEOUT = 20,
+    MOVE_TIMEOUT = 30,
     MOVE_DISTANCE_THRESHOLD = 4,
     HEIGHT_TWEEN_TIME = 1.5,
     HERBS_FOLDER_NAME = "Herbs",
@@ -4055,3 +4055,4 @@ startHerbSystem = function()
 end
 
 print("=== 系统初始化完成 ===")
+
