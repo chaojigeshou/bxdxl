@@ -20,7 +20,7 @@ local CraftPillEvent = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("C
 -- 核心配置
 local CONFIG = {
     -- 草药采摘配置
-    FLY_HEIGHT = 700,
+    FLY_HEIGHT = 750,
     NORMAL_HEIGHT_OFFSET = 5,
     FLY_SPEED = 90,
     MOVE_TIMEOUT = 20,
@@ -36,7 +36,14 @@ local CONFIG = {
     
     -- 修炼配置
     BREAKTHROUGH_INTERVAL = 3,
-    
+
+    -- 新增黑名单配置
+    BLACKLIST_HERBS = {
+        "Herbicide",  -- 除草剂，永不采集
+        "除草剂",      -- 中文名称也加入黑名单
+        "Weed Killer" -- 英文别名
+    },
+
     -- 炼药配置
     PILL_TYPES = {
         "Qi Spirit",
@@ -243,38 +250,54 @@ local function breakthroughOnce()
     return true
 end
 
--- ===================== 功法寻找功能 =====================
+-- ===================== 修复：功法寻找功能 =====================
+-- 从ReplicatedStorage.Auras加载所有功法类型
 -- 从ReplicatedStorage.Auras加载所有功法类型
 local function loadAuraTypesFromReplicatedStorage()
     local aurasList = {}
+    local seenNames = {}
     
     print("[功法列表] 从ReplicatedStorage.Auras文件夹加载功法列表...")
     
     local aurasFolder = ReplicatedStorage:FindFirstChild("Auras")
     if aurasFolder then
         print("[功法列表] 找到ReplicatedStorage.Auras文件夹，开始加载...")
+        print("[功法列表] Auras文件夹中的内容数量: " .. #aurasFolder:GetChildren())
         
-        -- 遍历所有功法对象
-        for _, item in ipairs(aurasFolder:GetChildren()) do
-            if item then
-                local auraName = item.Name
-                
-                -- 记录功法名称
-                table.insert(aurasList, auraName)
-                print("[功法列表] 添加功法: " .. auraName)
-                
-                -- 如果有子文件夹，也递归加载
-                if item:IsA("Folder") then
-                    for _, subItem in ipairs(item:GetChildren()) do
-                        if subItem then
-                            local subAuraName = subItem.Name
-                            table.insert(aurasList, subAuraName)
-                            print("[功法列表] 添加子功法: " .. subAuraName)
+        -- 递归获取所有Model的名称
+        local function scanAuraFolder(folder, prefix)
+            for _, item in ipairs(folder:GetChildren()) do
+                if item then
+                    -- 打印每个项目的详细信息
+                    print(string.format("[功法列表] 项目: %s (类型: %s)", item.Name, item.ClassName))
+                    
+                    -- 如果是Model，直接添加名称
+                    if item:IsA("Model") then
+                        local auraName = item.Name
+                        if not seenNames[auraName] then
+                            table.insert(aurasList, auraName)
+                            seenNames[auraName] = true
+                            print("[功法列表] 添加功法模型: " .. auraName)
+                        end
+                    -- 如果是Folder，递归扫描
+                    elseif item:IsA("Folder") then
+                        print("[功法列表] 进入子文件夹: " .. item.Name)
+                        scanAuraFolder(item, prefix .. item.Name .. "/")
+                    -- 如果是其他类型的BasePart，也考虑为功法
+                    elseif item:IsA("BasePart") or item:IsA("MeshPart") then
+                        local auraName = item.Name
+                        if not seenNames[auraName] then
+                            table.insert(aurasList, auraName)
+                            seenNames[auraName] = true
+                            print("[功法列表] 添加功法部件: " .. auraName)
                         end
                     end
                 end
             end
         end
+        
+        -- 开始扫描
+        scanAuraFolder(aurasFolder, "")
         
         -- 去重
         local uniqueAuras = {}
@@ -292,26 +315,89 @@ local function loadAuraTypesFromReplicatedStorage()
         print("[功法列表] 已加载 " .. #aurasList .. " 种功法类型")
         
         -- 打印所有功法类型
-        for i, auraName in ipairs(aurasList) do
-            print(string.format("[功法列表] %d. %s", i, auraName))
+        if #aurasList > 0 then
+            print("[功法列表] 加载的功法列表:")
+            for i, auraName in ipairs(aurasList) do
+                print(string.format("  %d. %s", i, auraName))
+            end
+        else
+            print("[功法列表] 警告: ReplicatedStorage.Auras文件夹中没有找到任何功法")
         end
     else
         print("[功法列表] 警告：未找到ReplicatedStorage.Auras文件夹")
-        print("[功法列表] 将使用默认功法关键词进行匹配")
+        print("[功法列表] 将尝试搜索其他可能的功法文件夹...")
         
-        -- 默认功法关键词（当ReplicatedStorage.Auras不存在时使用）
-        aurasList = {
-            "Aura",
-            "功法",
-            "Gongfa",
-            "Martial",
-            "Technique",
-            "Skill",
-            "Art",
-            "Spirit",
-            "Qi",
-            "Energy"
-        }
+        -- 尝试其他可能的文件夹名称
+        local possibleFolders = {"Auras", "功法", "Gongfa", "Skills", "MartialArts", "Techniques"}
+        for _, folderName in ipairs(possibleFolders) do
+            local folder = ReplicatedStorage:FindFirstChild(folderName)
+            if folder then
+                print("[功法列表] 找到替代功法文件夹: " .. folderName)
+                aurasFolder = folder
+                break
+            end
+        end
+        
+        if not aurasFolder then
+            print("[功法列表] 未找到任何功法文件夹，将使用默认功法关键词进行匹配")
+            
+            -- 默认功法关键词（当ReplicatedStorage.Auras不存在时使用）
+            aurasList = {
+                "Aura",
+                "功法",
+                "Gongfa",
+                "Martial",
+                "Technique",
+                "Skill",
+                "Art",
+                "Spirit",
+                "Qi",
+                "Energy",
+                "Kungfu",
+                "Power",
+                "Ability"
+            }
+        else
+            -- 扫描找到的替代文件夹
+            print("[功法列表] 扫描替代文件夹...")
+            local function scanAlternativeFolder(folder)
+                for _, item in ipairs(folder:GetChildren()) do
+                    if item and (item:IsA("Model") or item:IsA("BasePart")) then
+                        local auraName = item.Name
+                        if not seenNames[auraName] then
+                            table.insert(aurasList, auraName)
+                            seenNames[auraName] = true
+                            print("[功法列表] 添加功法: " .. auraName)
+                        end
+                    elseif item:IsA("Folder") then
+                        scanAlternativeFolder(item)
+                    end
+                end
+            end
+            
+            scanAlternativeFolder(aurasFolder)
+            
+            if #aurasList == 0 then
+                print("[功法列表] 替代文件夹中也没有找到功法，使用默认列表")
+                aurasList = {
+                    "Aura",
+                    "功法",
+                    "Gongfa",
+                    "Martial",
+                    "Technique",
+                    "Skill",
+                    "Art",
+                    "Spirit",
+                    "Qi"
+                }
+            end
+        end
+    end
+    
+    -- 确保至少有默认的功法名称
+    if #aurasList == 0 then
+        print("[功法列表] 警告: 功法列表为空，添加默认功法名称")
+        aurasList = {"Aura", "功法", "Gongfa"}
     end
     
     return aurasList
@@ -320,7 +406,7 @@ end
 -- 预加载功法类型列表
 local ValidAuraTypes = loadAuraTypesFromReplicatedStorage()
 
--- 检查对象是否为有效功法（名称在ValidAuraTypes中）
+-- 检查对象是否为有效功法
 local function isValidAura(auraObject)
     if not auraObject or not auraObject.Parent then
         return false
@@ -328,16 +414,37 @@ local function isValidAura(auraObject)
     
     local auraName = auraObject.Name
     
-    -- 检查名称是否在有效功法列表中
-    for _, validAuraName in ipairs(ValidAuraTypes) do
-        -- 精确匹配（确保只采集列表中的功法）
-        if auraName == validAuraName then
+    -- 常见功法关键词（可根据实际游戏调整）
+    local auraKeywords = {
+        "Aura", "功法", "Gongfa", "Martial", "Technique", "Skill", 
+        "Art", "Spirit", "Qi", "Energy", "Kungfu", "Power", "Ability",
+        "秘籍", "心法", "绝学", "武学", "技能", "Magic", "Mystic"
+    }
+    
+    -- 检查名称是否包含功法关键词
+    for _, keyword in ipairs(auraKeywords) do
+        if auraName:lower():find(keyword:lower(), 1, true) then
+            print(string.format("[功法验证] %s 匹配到关键词: %s", auraName, keyword))
             return true
         end
-        
-        -- 部分匹配（以防名称有后缀如 "_1", "_2" 等）
-        if auraName:find(validAuraName) then
-            print(string.format("[功法验证] %s 匹配到 %s (部分匹配)", auraName, validAuraName))
+    end
+    
+    -- 检查是否在功法文件夹中
+    local parent = auraObject.Parent
+    while parent and parent ~= game do
+        local parentName = parent.Name
+        if parentName == "Auras" or parentName == "功法" or parentName == "Skills" or 
+           parentName == "Gongfa" or parentName == "MartialArts" then
+            print(string.format("[功法验证] %s 在功法文件夹中: %s", auraName, parentName))
+            return true
+        end
+        parent = parent.Parent
+    end
+    
+    -- 检查是否在ValidAuraTypes列表中
+    for _, validAuraName in ipairs(ValidAuraTypes) do
+        if auraName == validAuraName then
+            print(string.format("[功法验证] %s 在功法列表中: %s", auraName, validAuraName))
             return true
         end
     end
@@ -345,161 +452,182 @@ local function isValidAura(auraObject)
     return false
 end
 
+-- 辅助函数：获取对象的完整路径（用于调试）
+local function getFullPath(obj)
+    local path = obj.Name
+    local current = obj
+    while current.Parent and current.Parent ~= game do
+        current = current.Parent
+        path = current.Name .. "/" .. path
+    end
+    return path
+end
+
 local function scanAuras()
-    print("[功法扫描] 开始扫描，使用ReplicatedStorage.Auras中的功法列表...")
+    print("[功法扫描] ======= 开始扫描功法 =======")
+    print("[功法扫描] 使用的功法列表:", #ValidAuraTypes, "种功法")
     
-    local aurasFolder = Workspace:FindFirstChild(AuraState.aurasFolderName)
     local validAuras = {}
     local currentTime = tick()
     
-    -- 如果有功法文件夹，先在文件夹中搜索
-    if aurasFolder then
-        print("[功法扫描] 在功法文件夹中搜索...")
-        
-        for _, item in ipairs(aurasFolder:GetChildren()) do
-            if not item or not item.Parent then
-                continue
-            end
-            
-            -- 检查是否是有效功法（名称在ReplicatedStorage.Auras列表中）
-            if not isValidAura(item) then
-                -- print("[功法扫描] 跳过非列表中的对象: " .. item.Name)
-                continue
-            end
-            
-            -- 检查是否已采集
-            local isCollected = false
-            for collectedAura, _ in pairs(HerbState.collectedHerbs) do
-                if collectedAura and collectedAura == item then
-                    isCollected = true
-                    break
-                end
-            end
-            
-            -- 检查是否超时
-            local isTimedOut = false
-            for timeoutAura, timeoutTime in pairs(HerbState.timeoutHerbs) do
-                if timeoutAura and timeoutAura == item then
-                    if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
-                        isTimedOut = true
-                    end
-                    break
-                end
-            end
-            
-            local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == item) or 
-                                   (AuraState.currentAura and AuraState.currentAura == item)
-            
-            -- 支持多种类型的功法对象
-            local isValidType = item:IsA("MeshPart") or item:IsA("Part") or item:IsA("Model")
-            
-            if isValidType and not isCollected and not isTimedOut and (not isCurrentTarget or not item.Parent) then
-                table.insert(validAuras, item)
-                print(string.format("[功法扫描] 找到有效功法: %s (类型: %s)", item.Name, item.ClassName))
-            end
+    -- 清理过期的超时记录
+    for herb, timeoutTime in pairs(HerbState.timeoutHerbs) do
+        if currentTime - timeoutTime > CONFIG.TIMEOUT_COOLDOWN then
+            HerbState.timeoutHerbs[herb] = nil
         end
-    else
-        print("[功法扫描] 未找到功法文件夹，将在整个Workspace中搜索列表中的功法")
     end
     
-    -- 如果功法文件夹中没有找到有效功法，或者没有功法文件夹，在整个Workspace中搜索
-    if #validAuras == 0 then
+    -- 1. 优先在功法文件夹中搜索
+    local auraFolders = {"Auras", "功法", "Gongfa", "Skills", "MartialArts"}
+    local foundInFolders = false
+    
+    for _, folderName in ipairs(auraFolders) do
+        local aurasFolder = Workspace:FindFirstChild(folderName)
+        if aurasFolder then
+            print("[功法扫描] 在功法文件夹中搜索: " .. folderName)
+            
+            -- 遍历文件夹中的所有对象
+            for _, item in ipairs(aurasFolder:GetDescendants()) do
+                if item and item.Parent then
+                    -- 只处理BasePart或Model
+                    if item:IsA("BasePart") or item:IsA("Model") then
+                        if isValidAura(item) then
+                            -- 检查是否已采集
+                            local isCollected = false
+                            for collectedAura, _ in pairs(HerbState.collectedHerbs) do
+                                if collectedAura and collectedAura == item then
+                                    isCollected = true
+                                    break
+                                end
+                            end
+                            
+                            -- 检查是否超时
+                            local isTimedOut = false
+                            for timeoutAura, timeoutTime in pairs(HerbState.timeoutHerbs) do
+                                if timeoutAura and timeoutAura == item then
+                                    if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
+                                        isTimedOut = true
+                                    end
+                                    break
+                                end
+                            end
+                            
+                            local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == item) or 
+                                                   (AuraState.currentAura and AuraState.currentAura == item)
+                            
+                            if not isCollected and not isTimedOut and (not isCurrentTarget or not item.Parent) then
+                                table.insert(validAuras, item)
+                                foundInFolders = true
+                                print(string.format("[功法扫描] 找到功法: %s (类型: %s, 在文件夹: %s)", 
+                                    item.Name, item.ClassName, folderName))
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- 2. 如果功法文件夹中没有找到，搜索整个Workspace
+    if not foundInFolders then
         print("[功法扫描] 在功法文件夹中未找到有效功法，开始搜索整个Workspace...")
         
+        -- 搜索第一层对象
         for _, child in ipairs(Workspace:GetChildren()) do
-            if not child or not child.Parent then
-                continue
-            end
-            
-            -- 检查是否是有效功法（名称在ReplicatedStorage.Auras列表中）
-            if not isValidAura(child) then
-                continue
-            end
-            
-            -- 检查是否已采集
-            local isCollected = false
-            for collectedAura, _ in pairs(HerbState.collectedHerbs) do
-                if collectedAura and collectedAura == child then
-                    isCollected = true
-                    break
-                end
-            end
-            
-            -- 检查是否超时
-            local isTimedOut = false
-            for timeoutAura, timeoutTime in pairs(HerbState.timeoutHerbs) do
-                if timeoutAura and timeoutAura == child then
-                    if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
-                        isTimedOut = true
+            if child and child.Parent then
+                -- 检查是否是模型或部件
+                if child:IsA("Model") or child:IsA("MeshPart") or child:IsA("Part") then
+                    -- 检查是否是有效功法
+                    if isValidAura(child) then
+                        -- 检查采集状态
+                        local isCollected = false
+                        for collectedAura, _ in pairs(HerbState.collectedHerbs) do
+                            if collectedAura and collectedAura == child then
+                                isCollected = true
+                                break
+                            end
+                        end
+                        
+                        local isTimedOut = false
+                        for timeoutAura, timeoutTime in pairs(HerbState.timeoutHerbs) do
+                            if timeoutAura and timeoutAura == child then
+                                if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
+                                    isTimedOut = true
+                                end
+                                break
+                            end
+                        end
+                        
+                        local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == child) or 
+                                               (AuraState.currentAura and AuraState.currentAura == child)
+                        
+                        if not isCollected and not isTimedOut and (not isCurrentTarget or not child.Parent) then
+                            table.insert(validAuras, child)
+                            print(string.format("[功法扫描] 在整个Workspace中找到功法: %s (类型: %s)", 
+                                child.Name, child.ClassName))
+                        end
                     end
-                    break
                 end
-            end
-            
-            local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == child) or 
-                                   (AuraState.currentAura and AuraState.currentAura == child)
-            
-            -- 支持多种类型的功法对象
-            local isValidType = child:IsA("MeshPart") or child:IsA("Part") or child:IsA("Model")
-            
-            if isValidType and not isCollected and not isTimedOut and (not isCurrentTarget or not child.Parent) then
-                table.insert(validAuras, child)
-                print(string.format("[功法扫描] 在整个Workspace中找到有效功法: %s (类型: %s)", child.Name, child.ClassName))
             end
         end
-    end
-    
-    -- 如果没有找到有效功法，尝试深度搜索（包含子对象）
-    if #validAuras == 0 then
-        print("[功法扫描] 第一层未找到，开始深度搜索Workspace中的所有子对象...")
         
-        for _, child in ipairs(Workspace:GetDescendants()) do
-            if not child or not child.Parent then
-                continue
-            end
+        -- 3. 如果第一层没找到，深度搜索
+        if #validAuras == 0 then
+            print("[功法扫描] 第一层未找到，开始深度搜索Workspace中的所有子对象...")
             
-            -- 检查是否是有效功法（名称在ReplicatedStorage.Auras列表中）
-            if not isValidAura(child) then
-                continue
-            end
-            
-            -- 只处理特定类型的对象
-            if not (child:IsA("MeshPart") or child:IsA("Part") or child:IsA("Model")) then
-                continue
-            end
-            
-            -- 检查是否已采集
-            local isCollected = false
-            for collectedAura, _ in pairs(HerbState.collectedHerbs) do
-                if collectedAura and collectedAura == child then
-                    isCollected = true
-                    break
-                end
-            end
-            
-            -- 检查是否超时
-            local isTimedOut = false
-            for timeoutAura, timeoutTime in pairs(HerbState.timeoutHerbs) do
-                if timeoutAura and timeoutAura == child then
-                    if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
-                        isTimedOut = true
+            for _, descendant in ipairs(Workspace:GetDescendants()) do
+                if descendant and descendant.Parent then
+                    -- 只处理特定类型的对象
+                    if descendant:IsA("Model") or descendant:IsA("MeshPart") or descendant:IsA("Part") then
+                        -- 检查是否是有效功法
+                        if isValidAura(descendant) then
+                            -- 避免重复添加
+                            local alreadyAdded = false
+                            for _, addedAura in ipairs(validAuras) do
+                                if addedAura == descendant then
+                                    alreadyAdded = true
+                                    break
+                                end
+                            end
+                            
+                            if not alreadyAdded then
+                                -- 检查采集状态
+                                local isCollected = false
+                                for collectedAura, _ in pairs(HerbState.collectedHerbs) do
+                                    if collectedAura and collectedAura == descendant then
+                                        isCollected = true
+                                        break
+                                    end
+                                end
+                                
+                                local isTimedOut = false
+                                for timeoutAura, timeoutTime in pairs(HerbState.timeoutHerbs) do
+                                    if timeoutAura and timeoutAura == descendant then
+                                        if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
+                                            isTimedOut = true
+                                        end
+                                        break
+                                    end
+                                end
+                                
+                                local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == descendant) or 
+                                                       (AuraState.currentAura and AuraState.currentAura == descendant)
+                                
+                                if not isCollected and not isTimedOut and (not isCurrentTarget or not descendant.Parent) then
+                                    table.insert(validAuras, descendant)
+                                    print(string.format("[功法扫描] 深度搜索找到功法: %s (类型: %s, 路径: %s)", 
+                                        descendant.Name, descendant.ClassName, getFullPath(descendant)))
+                                end
+                            end
+                        end
                     end
-                    break
+                    -- 如果类型不符合，什么也不做，继续循环
                 end
-            end
-            
-            local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == child) or 
-                                   (AuraState.currentAura and AuraState.currentAura == child)
-            
-            if not isCollected and not isTimedOut and (not isCurrentTarget or not child.Parent) then
-                table.insert(validAuras, child)
-                print(string.format("[功法扫描] 深度搜索找到有效功法: %s (类型: %s, 路径: %s)", 
-                    child.Name, child.ClassName, getFullPath(child)))
             end
         end
     end
     
-    print(string.format("[功法扫描] 扫描完成，找到 %d 个有效功法（来自ReplicatedStorage.Auras列表）", #validAuras))
+    print(string.format("[功法扫描] 扫描完成，找到 %d 个有效功法", #validAuras))
     
     -- 按距离排序，返回最近的功法
     if #validAuras > 0 then
@@ -511,19 +639,18 @@ local function scanAuras()
             local distB = (posB - playerPos).Magnitude
             return distA < distB
         end)
+        
+        -- 打印找到的功法信息
+        for i, aura in ipairs(validAuras) do
+            if i <= 5 then -- 只打印前5个
+                local pos = getHerbPosition(aura)
+                local distance = (pos - playerPos).Magnitude
+                print(string.format("[功法扫描] %d. %s (距离: %.1f米)", i, aura.Name, distance))
+            end
+        end
     end
     
     return validAuras
-end
-
--- 辅助函数：获取对象的完整路径（用于调试）
-local function getFullPath(obj)
-    local path = obj.Name
-    while obj.Parent and obj.Parent ~= Workspace do
-        obj = obj.Parent
-        path = obj.Name .. "/" .. path
-    end
-    return path
 end
 
 -- ===================== 草药采摘功能 =====================
@@ -862,6 +989,20 @@ local function scanHerbs()
             continue
         end
         
+        -- 检查是否是黑名单草药
+        local isBlacklisted = false
+        for _, blacklistName in ipairs(CONFIG.BLACKLIST_HERBS) do
+            if item.Name == blacklistName or item.Name:match(blacklistName) then
+                isBlacklisted = true
+                print(string.format("[扫描] 跳过黑名单草药: %s", item.Name))
+                break
+            end
+        end
+        
+        if isBlacklisted then
+            continue
+        end
+        
         -- 检查是否已采集
         local isCollected = false
         for collectedHerb, _ in pairs(HerbState.collectedHerbs) do
@@ -909,6 +1050,20 @@ local function scanHerbs()
                 if child:IsA("Folder") or child:IsA("Model") then
                     deepSearch(child)
                 elseif (child:IsA("MeshPart") or child:IsA("Part")) then
+                    -- 检查是否是黑名单草药
+                    local isBlacklisted = false
+                    for _, blacklistName in ipairs(CONFIG.BLACKLIST_HERBS) do
+                        if child.Name == blacklistName or child.Name:match(blacklistName) then
+                            isBlacklisted = true
+                            print(string.format("[深度扫描] 跳过黑名单草药: %s", child.Name))
+                            break
+                        end
+                    end
+                    
+                    if isBlacklisted then
+                        continue
+                    end
+                    
                     local herbKeywords = {"Herb", "Plant", "草药", "药草", "采集物"}
                     for _, keyword in ipairs(herbKeywords) do
                         if child.Name:match(keyword) then
@@ -929,6 +1084,15 @@ local function scanHerbs()
     end
     
     print(string.format("[扫描] 找到有效草药数量：%d", #validHerbs))
+    
+    -- 打印找到的草药列表（调试用）
+    if #validHerbs > 0 then
+        for i, herb in ipairs(validHerbs) do
+            if i <= 10 then  -- 只打印前10个
+                print(string.format("[扫描] 草药 %d: %s", i, herb.Name))
+            end
+        end
+    end
     
     return validHerbs
 end
@@ -996,7 +1160,11 @@ local function findBestTarget()
                 HerbState.currentHerb = nil
                 print(string.format("[寻找] 选择功法: %s (距离: %.1f米)", closestAura.Name, closestDistance))
                 return closestAura, true -- 第二个参数true表示这是功法
+            else
+                print("[寻找] 虽然扫描到功法，但所有功法都无法访问")
             end
+        else
+            print("[寻找] 未找到任何功法")
         end
     end
     
@@ -1488,6 +1656,7 @@ local function mainLoop()
     end
     
     print("[主流程] 目标模式: " .. HerbState.targetMode)
+    print("[主流程] 黑名单草药: " .. table.concat(CONFIG.BLACKLIST_HERBS, ", "))
     
     HerbState.currentTimeoutCount = 0
     HerbState.failCount = 0
@@ -1498,9 +1667,14 @@ local function mainLoop()
             break
         end
         
+        -- 重置当前目标，强制重新搜索
         HerbState.currentHerb = nil
         AuraState.currentAura = nil
         
+        -- 清理已采集的草药记录，确保重新扫描时能找到新草药
+        HerbState.collectedHerbs = {}
+        
+        print("[主流程] 重新扫描草药列表...")
         local bestTarget, isAura = findBestTarget()
         if not bestTarget then
             print("[主流程] 未找到任何目标，5秒后重试")
@@ -1626,6 +1800,14 @@ local function mainLoop()
             if HerbState.isRunning then
                 ascendToFlyHeight()
             end
+            
+            -- 采集成功后，立即清除当前目标，确保下次循环重新扫描
+            HerbState.currentHerb = nil
+            AuraState.currentAura = nil
+            
+            -- 短暂延迟后继续下一次循环
+            task.wait(0.5)
+            continue
         else
             print("[主流程] 采集超时，当前超时次数：" .. HerbState.currentTimeoutCount)
             
@@ -1664,8 +1846,6 @@ local function mainLoop()
                 end
             end
         end
-
-        task.wait(0.5)
     end
 
     disableFlight()
@@ -1676,6 +1856,7 @@ local function mainLoop()
     HerbState.failCount = 0
     print("[主流程] 已停止")
 end
+
 
 local function startHerbSystem()
     if HerbState.isRunning then
@@ -1864,6 +2045,20 @@ local function loadHerbTypesFromReplicatedStorage()
             if not item then continue end
             
             local herbName = item.Name
+            
+            -- 检查是否是黑名单草药
+            local isBlacklisted = false
+            for _, blacklistName in ipairs(CONFIG.BLACKLIST_HERBS) do
+                if herbName == blacklistName or herbName:match(blacklistName) then
+                    isBlacklisted = true
+                    print("[草药列表] 跳过黑名单草药: " .. herbName)
+                    break
+                end
+            end
+            
+            if isBlacklisted then
+                continue
+            end
             
             -- 检查是否是草药对象
             local isHerbObject = false
@@ -3656,11 +3851,17 @@ end
 print("=== 多功能采集系统 ===")
 print("版本: 修复优化版")
 print("主要功能:")
-print("1. 草药系统: 优先级草药选择")
-print("2. 功法系统: 优先采集功法")
-print("3. 修炼系统: 自动突破")
-print("4. 炼药系统: 独立设置界面")
-print("5. 移动设备适配")
+print("1. 草药系统: 优先级草药选择 (已加载 " .. #HerbState.availableHerbTypes .. " 种草药)")
+print("2. 功法系统: 优先采集功法 (已加载 " .. #ValidAuraTypes .. " 种功法类型)")
+print("3. 修炼系统: 自动突破 (间隔: " .. CONFIG.BREAKTHROUGH_INTERVAL .. "秒)")
+print("4. 炼药系统: 独立设置界面 (支持 " .. #CONFIG.PILL_TYPES .. " 种丹药)")
+print("5. 移动设备适配: " .. (UserInputService.TouchEnabled and "已启用" or "未启用"))
+
+print("\n系统已启动:")
+print("- 主界面: 屏幕左上角")
+print("- 移动设备: 左侧有打开/关闭按钮")
+print("- 四个独立系统: 草药、功法、修炼、炼药")
+print("- 日志级别: 详细 (可在代码中调整)")
 
 -- 预加载草药类型
 loadHerbTypesFromReplicatedStorage()
@@ -3670,11 +3871,6 @@ createMobileToggle()
 
 -- 创建主UI
 createMainUI()
-
-print("系统已启动:")
-print("- 主界面: 屏幕左上角")
-print("- 移动设备: 左侧有打开/关闭按钮")
-print("- 四个独立系统: 草药、功法、修炼、炼药")
 
 -- ===================== 角色重生处理 =====================
 local wasHerbRunningBeforeDeath = false
