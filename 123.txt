@@ -2165,7 +2165,7 @@ local function createPrioritySelectionUI()
     local selectionLabel = Instance.new("TextLabel")
     selectionLabel.Name = "SelectionLabel"
     selectionLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
-    selectionLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 100)
+    selectionLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 1000)
     selectionLabel.BackgroundTransparency = 1
     selectionLabel.Text = "已选择: 0/" .. CONFIG.MAX_PRIORITY_HERBS
     selectionLabel.TextColor3 = Color3.fromRGB(200, 255, 200)
@@ -2929,7 +2929,7 @@ local function createPillUI()
     -- 炼制次数应用按钮事件
     countApplyButton.MouseButton1Click:Connect(function()
         local count = tonumber(countTextBox.Text) or 1
-        count = math.max(1, math.min(100, count)) -- 限制1-100次
+        count = math.max(1, math.min(1000, count)) -- 限制1-1000次
         PillState.craftCount = count
         countTextBox.Text = tostring(count)
         countLabel.Text = "炼制次数: " .. count
@@ -2939,7 +2939,7 @@ local function createPillUI()
     -- 炼制次数输入框事件
     countTextBox.FocusLost:Connect(function()
         local count = tonumber(countTextBox.Text) or 1
-        count = math.max(1, math.min(100, count)) -- 限制1-100次
+        count = math.max(1, math.min(1000, count)) -- 限制1-1000次
         PillState.craftCount = count
         countTextBox.Text = tostring(count)
         countLabel.Text = "炼制次数: " .. count
@@ -2971,7 +2971,7 @@ local function createPillUI()
         local count = tonumber(countTextBox.Text) or 1
         local interval = tonumber(intervalTextBox.Text) or 3
         
-        count = math.max(1, math.min(100, count)) -- 限制1-100次
+        count = math.max(1, math.min(1000, count)) -- 限制1-100次
         interval = math.max(1, math.min(60, interval)) -- 限制1-60秒
         
         PillState.craftCount = count
@@ -4055,4 +4055,5 @@ startHerbSystem = function()
 end
 
 print("=== 系统初始化完成 ===")
+
 
