@@ -5,6 +5,7 @@ local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
 
 -- 初始化玩家
 local player = Players.LocalPlayer
@@ -22,7 +23,7 @@ local CONFIG = {
     -- 草药采摘配置
     FLY_HEIGHT = 750,
     NORMAL_HEIGHT_OFFSET = 5,
-    FLY_SPEED = 90,
+    FLY_SPEED = 110,
     MOVE_TIMEOUT = 30,
     MOVE_DISTANCE_THRESHOLD = 4,
     HEIGHT_TWEEN_TIME = 1.5,
@@ -35,13 +36,11 @@ local CONFIG = {
     UI_UPDATE_INTERVAL = 1,
     
     -- 修炼配置
-    BREAKTHROUGH_INTERVAL = 3,
+    BREAKTHROUGH_INTERVAL = 2,
 
     -- 新增黑名单配置
     BLACKLIST_HERBS = {
-        "Herbicide",  -- 除草剂，永不采集
-        "除草剂",      -- 中文名称也加入黑名单
-        "Weed Killer" -- 英文别名
+        "Herbicide"  -- 除草剂，永不采集
     },
 
     -- 炼药配置
@@ -98,7 +97,13 @@ local HerbState = {
     mainLoopCoroutine = nil,
     collectHerbs = true,  -- 是否采集草药
     collectAuras = true,  -- 是否采集功法
-    targetMode = "both"   -- 目标模式: both, herb, aura
+    targetMode = "both",   -- 目标模式: both, herb, aura
+    quickPickEnabled = false,  -- 一键加速开关
+    autoHarvestEnabled = false,  -- 自动采摘开关
+    autoHarvestConnection = nil,  -- 自动采摘连接
+    modifiedHerbs = {},  -- 已修改采摘时间的草药记录
+    herbsFolderListener = nil,  -- 草药文件夹监听器
+    quickPickConnection = nil  -- 一键加速连接器
 }
 
 -- 功法状态
@@ -124,56 +129,6 @@ local PillState = {
     craftConnection = nil,
     isPillUIOpen = false
 }
-
--- ===================== 移动设备适配 =====================
-local MobileToggleButton = nil
-local MobileToggleGUI = nil
-
-local function createMobileToggle()
-    -- 清理旧按钮
-    if CoreGui:FindFirstChild("HerbMobileToggle") then
-        CoreGui.HerbMobileToggle:Destroy()
-    end
-    
-    -- 只在移动设备上显示按钮
-    if UserInputService.KeyboardEnabled and not UserInputService.TouchEnabled then
-        print("[移动端] 检测到键盘设备，隐藏移动端按钮")
-        return
-    end
-    
-    print("[移动端] 创建移动端切换按钮")
-    
-    local mobileToggleGUI = Instance.new("ScreenGui")
-    mobileToggleGUI.Name = "HerbMobileToggle"
-    mobileToggleGUI.Parent = CoreGui
-    mobileToggleGUI.ResetOnSpawn = false
-    mobileToggleGUI.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    mobileToggleGUI.DisplayOrder = 100
-    
-    local toggleButton = Instance.new("TextButton")
-    toggleButton.Name = "ToggleButton"
-    toggleButton.Parent = mobileToggleGUI
-    toggleButton.BackgroundColor3 = Color3.fromRGB(40, 60, 40)
-    toggleButton.BorderColor3 = Color3.fromRGB(29, 29, 35)
-    toggleButton.Position = UDim2.new(0.005, 0, 0.4, 0)
-    toggleButton.Size = UDim2.new(0, 80, 0, 36)
-    toggleButton.Font = Enum.Font.SourceSansBold
-    toggleButton.Text = "打开界面"
-    toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    toggleButton.TextSize = 14
-    toggleButton.Active = true
-    toggleButton.Draggable = true
-    toggleButton.Visible = true
-    
-    local buttonCorner = Instance.new("UICorner")
-    buttonCorner.CornerRadius = UDim.new(0, 5)
-    buttonCorner.Parent = toggleButton
-    
-    MobileToggleButton = toggleButton
-    MobileToggleGUI = mobileToggleGUI
-    
-    return mobileToggleGUI
-end
 
 -- ===================== 修炼功能 =====================
 local function toggleCultivation()
@@ -250,405 +205,382 @@ local function breakthroughOnce()
     return true
 end
 
--- ===================== 修复：功法寻找功能 =====================
--- 从ReplicatedStorage.Auras加载所有功法类型
--- 从ReplicatedStorage.Auras加载所有功法类型
-local function loadAuraTypesFromReplicatedStorage()
-    local aurasList = {}
-    local seenNames = {}
-    
-    print("[功法列表] 从ReplicatedStorage.Auras文件夹加载功法列表...")
-    
-    local aurasFolder = ReplicatedStorage:FindFirstChild("Auras")
-    if aurasFolder then
-        print("[功法列表] 找到ReplicatedStorage.Auras文件夹，开始加载...")
-        print("[功法列表] Auras文件夹中的内容数量: " .. #aurasFolder:GetChildren())
-        
-        -- 递归获取所有Model的名称
-        local function scanAuraFolder(folder, prefix)
-            for _, item in ipairs(folder:GetChildren()) do
-                if item then
-                    -- 打印每个项目的详细信息
-                    print(string.format("[功法列表] 项目: %s (类型: %s)", item.Name, item.ClassName))
-                    
-                    -- 如果是Model，直接添加名称
-                    if item:IsA("Model") then
-                        local auraName = item.Name
-                        if not seenNames[auraName] then
-                            table.insert(aurasList, auraName)
-                            seenNames[auraName] = true
-                            print("[功法列表] 添加功法模型: " .. auraName)
-                        end
-                    -- 如果是Folder，递归扫描
-                    elseif item:IsA("Folder") then
-                        print("[功法列表] 进入子文件夹: " .. item.Name)
-                        scanAuraFolder(item, prefix .. item.Name .. "/")
-                    -- 如果是其他类型的BasePart，也考虑为功法
-                    elseif item:IsA("BasePart") or item:IsA("MeshPart") then
-                        local auraName = item.Name
-                        if not seenNames[auraName] then
-                            table.insert(aurasList, auraName)
-                            seenNames[auraName] = true
-                            print("[功法列表] 添加功法部件: " .. auraName)
-                        end
-                    end
-                end
-            end
-        end
-        
-        -- 开始扫描
-        scanAuraFolder(aurasFolder, "")
-        
-        -- 去重
-        local uniqueAuras = {}
-        local cleanList = {}
-        for _, auraName in ipairs(aurasList) do
-            if not uniqueAuras[auraName] then
-                uniqueAuras[auraName] = true
-                table.insert(cleanList, auraName)
-            end
-        end
-        
-        aurasList = cleanList
-        
-        table.sort(aurasList)
-        print("[功法列表] 已加载 " .. #aurasList .. " 种功法类型")
-        
-        -- 打印所有功法类型
-        if #aurasList > 0 then
-            print("[功法列表] 加载的功法列表:")
-            for i, auraName in ipairs(aurasList) do
-                print(string.format("  %d. %s", i, auraName))
-            end
-        else
-            print("[功法列表] 警告: ReplicatedStorage.Auras文件夹中没有找到任何功法")
-        end
-    else
-        print("[功法列表] 警告：未找到ReplicatedStorage.Auras文件夹")
-        print("[功法列表] 将尝试搜索其他可能的功法文件夹...")
-        
-        -- 尝试其他可能的文件夹名称
-        local possibleFolders = {"Auras", "功法", "Gongfa", "Skills", "MartialArts", "Techniques"}
-        for _, folderName in ipairs(possibleFolders) do
-            local folder = ReplicatedStorage:FindFirstChild(folderName)
-            if folder then
-                print("[功法列表] 找到替代功法文件夹: " .. folderName)
-                aurasFolder = folder
-                break
-            end
-        end
-        
-        if not aurasFolder then
-            print("[功法列表] 未找到任何功法文件夹，将使用默认功法关键词进行匹配")
-            
-            -- 默认功法关键词（当ReplicatedStorage.Auras不存在时使用）
-            aurasList = {
-                "Aura",
-                "功法",
-                "Gongfa",
-                "Martial",
-                "Technique",
-                "Skill",
-                "Art",
-                "Spirit",
-                "Qi",
-                "Energy",
-                "Kungfu",
-                "Power",
-                "Ability"
-            }
-        else
-            -- 扫描找到的替代文件夹
-            print("[功法列表] 扫描替代文件夹...")
-            local function scanAlternativeFolder(folder)
-                for _, item in ipairs(folder:GetChildren()) do
-                    if item and (item:IsA("Model") or item:IsA("BasePart")) then
-                        local auraName = item.Name
-                        if not seenNames[auraName] then
-                            table.insert(aurasList, auraName)
-                            seenNames[auraName] = true
-                            print("[功法列表] 添加功法: " .. auraName)
-                        end
-                    elseif item:IsA("Folder") then
-                        scanAlternativeFolder(item)
-                    end
-                end
-            end
-            
-            scanAlternativeFolder(aurasFolder)
-            
-            if #aurasList == 0 then
-                print("[功法列表] 替代文件夹中也没有找到功法，使用默认列表")
-                aurasList = {
-                    "Aura",
-                    "功法",
-                    "Gongfa",
-                    "Martial",
-                    "Technique",
-                    "Skill",
-                    "Art",
-                    "Spirit",
-                    "Qi"
-                }
-            end
-        end
-    end
-    
-    -- 确保至少有默认的功法名称
-    if #aurasList == 0 then
-        print("[功法列表] 警告: 功法列表为空，添加默认功法名称")
-        aurasList = {"Aura", "功法", "Gongfa"}
-    end
-    
-    return aurasList
-end
-
--- 预加载功法类型列表
-local ValidAuraTypes = loadAuraTypesFromReplicatedStorage()
-
--- 检查对象是否为有效功法
-local function isValidAura(auraObject)
-    if not auraObject or not auraObject.Parent then
+-- ===================== 炼药功能 =====================
+local function startCraftPills(pillType, count)
+    if PillState.isCrafting then
+        print("[炼药] 炼药已在运行中")
         return false
     end
     
-    local auraName = auraObject.Name
-    
-    -- 常见功法关键词（可根据实际游戏调整）
-    local auraKeywords = {
-        "Aura", "功法", "Gongfa", "Martial", "Technique", "Skill", 
-        "Art", "Spirit", "Qi", "Energy", "Kungfu", "Power", "Ability",
-        "秘籍", "心法", "绝学", "武学", "技能", "Magic", "Mystic"
-    }
-    
-    -- 检查名称是否包含功法关键词
-    for _, keyword in ipairs(auraKeywords) do
-        if auraName:lower():find(keyword:lower(), 1, true) then
-            print(string.format("[功法验证] %s 匹配到关键词: %s", auraName, keyword))
-            return true
-        end
+    if not pillType or pillType == "" then
+        print("[炼药] 请选择丹药类型")
+        return false
     end
     
-    -- 检查是否在功法文件夹中
-    local parent = auraObject.Parent
-    while parent and parent ~= game do
-        local parentName = parent.Name
-        if parentName == "Auras" or parentName == "功法" or parentName == "Skills" or 
-           parentName == "Gongfa" or parentName == "MartialArts" then
-            print(string.format("[功法验证] %s 在功法文件夹中: %s", auraName, parentName))
-            return true
-        end
-        parent = parent.Parent
+    -- 检查炼药事件是否存在
+    if not CraftPillEvent or not CraftPillEvent.FireServer then
+        print("[炼药] 错误: 炼药事件未找到或无效")
+        return false
     end
     
-    -- 检查是否在ValidAuraTypes列表中
-    for _, validAuraName in ipairs(ValidAuraTypes) do
-        if auraName == validAuraName then
-            print(string.format("[功法验证] %s 在功法列表中: %s", auraName, validAuraName))
-            return true
-        end
-    end
+    count = math.max(1, tonumber(count) or 1)
     
-    return false
+    print(string.format("[炼药] 开始炼制 %s x%d (间隔: %d秒)", pillType, count, PillState.craftInterval))
+    
+    PillState.isCrafting = true
+    PillState.currentPillType = pillType
+    PillState.craftCount = count
+    
+    task.spawn(function()
+        local crafted = 0
+        
+        while PillState.isCrafting and crafted < count do
+            -- 再次安全检查
+            if not CraftPillEvent or not CraftPillEvent.FireServer then
+                print("[炼药] 错误: 炼药事件丢失，停止炼药")
+                break
+            end
+            
+            -- 使用pcall安全调用
+            local success, err = pcall(function()
+                CraftPillEvent:FireServer(pillType)
+            end)
+            
+            if not success then
+                print("[炼药] 触发远程炼药事件失败: " .. tostring(err))
+                break
+            end
+            
+            crafted = crafted + 1
+            
+            print(string.format("[炼药] 触发远程炼药事件 (%d/%d) - 时间: %s", 
+                crafted, count, os.date("%H:%M:%S")))
+            
+            -- 只有不是最后一次时才等待
+            if crafted < count then
+                -- 使用真正的等待时间
+                local waitStart = tick()
+                while PillState.isCrafting and tick() - waitStart < PillState.craftInterval do
+                    task.wait(0.1) -- 每0.1秒检查一次，避免长时间阻塞
+                end
+            end
+        end
+        
+        -- 炼药完成后重置状态
+        if PillState.isCrafting then
+            PillState.isCrafting = false
+            print(string.format("[炼药] 炼药完成，共炼制 %d 次", crafted))
+        end
+    end)
+    
+    return true
 end
 
--- 辅助函数：获取对象的完整路径（用于调试）
-local function getFullPath(obj)
-    local path = obj.Name
-    local current = obj
-    while current.Parent and current.Parent ~= game do
-        current = current.Parent
-        path = current.Name .. "/" .. path
+local function stopCraftPills()
+    if not PillState.isCrafting then
+        print("[炼药] 炼药未在运行")
+        return false
     end
-    return path
+    
+    PillState.isCrafting = false
+    
+    print("[炼药] 炼药已停止")
+    return true
 end
 
+local function craftSinglePill(pillType)
+    if not pillType or pillType == "" then
+        print("[炼药] 请选择丹药类型")
+        return false
+    end
+    
+    -- 检查炼药事件是否存在
+    if not CraftPillEvent or not CraftPillEvent.FireServer then
+        print("[炼药] 错误: 炼药事件未找到或无效")
+        return false
+    end
+    
+    -- 使用pcall安全调用
+    local success, err = pcall(function()
+        CraftPillEvent:FireServer(pillType)
+    end)
+    
+    if success then
+        print(string.format("[炼药] 触发单次炼药事件 - 时间: %s", os.date("%H:%M:%S")))
+    else
+        print("[炼药] 触发单次炼药事件失败: " .. tostring(err))
+    end
+    
+    return success
+end
+
+-- ===================== 修复一键加速：实时监控新草药 =====================
+local function modifySingleHerbPickTime(herb)
+    if not herb then return false end
+    
+    -- 检查是否已经修改过
+    if HerbState.modifiedHerbs[herb] then
+        return false
+    end
+    
+    local success = false
+    
+    -- 递归查找ProximityPrompt
+    local function findAndChangePrompts(obj)
+        for _, child in ipairs(obj:GetChildren()) do
+            if child:IsA("ProximityPrompt") then
+                -- 把按住时间改成0，这样点一下就采到了
+                child.HoldDuration = 0
+                
+                -- 有些草药可能还有Data子项，也一起改了
+                if child:FindFirstChild("Data") then
+                    local data = child.Data
+                    local holdTime = data:FindFirstChild("HoldDuration")
+                    if holdTime then
+                        holdTime.Value = 0
+                    end
+                end
+                
+                success = true
+            else
+                -- 继续往子对象里找
+                findAndChangePrompts(child)
+            end
+        end
+    end
+    
+    findAndChangePrompts(herb)
+    
+    if success then
+        HerbState.modifiedHerbs[herb] = true
+    end
+    
+    return success
+end
+
+local function setupQuickPickListener()
+    if HerbState.quickPickConnection then
+        HerbState.quickPickConnection:Disconnect()
+        HerbState.quickPickConnection = nil
+    end
+    
+    if not HerbState.quickPickEnabled then
+        return
+    end
+    
+    print("[一键加速] 设置草药监控器")
+    
+    -- 监听草药文件夹
+    local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
+    if herbsFolder then
+        -- 立即修改所有现有草药
+        for _, herb in ipairs(herbsFolder:GetChildren()) do
+            modifySingleHerbPickTime(herb)
+        end
+        
+        -- 监听新生成的草药
+        HerbState.quickPickConnection = herbsFolder.ChildAdded:Connect(function(child)
+            if child and child.Parent then
+                task.wait(0.5) -- 等待0.5秒让草药完全生成
+                modifySingleHerbPickTime(child)
+                print("[一键加速] 新草药已修改: " .. child.Name)
+            end
+        end)
+    end
+end
+
+local function toggleQuickPick()
+    HerbState.quickPickEnabled = not HerbState.quickPickEnabled
+    
+    if HerbState.quickPickEnabled then
+        print("[一键加速] 开启一键加速")
+        -- 设置监听器
+        setupQuickPickListener()
+        -- 立即应用修改到所有现有草药
+        local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
+        if herbsFolder then
+            for _, herb in ipairs(herbsFolder:GetChildren()) do
+                modifySingleHerbPickTime(herb)
+            end
+        end
+    else
+        print("[一键加速] 关闭一键加速")
+        -- 清除修改记录和监听器
+        HerbState.modifiedHerbs = {}
+        if HerbState.quickPickConnection then
+            HerbState.quickPickConnection:Disconnect()
+            HerbState.quickPickConnection = nil
+        end
+    end
+    
+    return HerbState.quickPickEnabled
+end
+
+-- ===================== 修复自动采摘功能：0.1秒触发 =====================
+local function autoHarvestNearestHerb()
+    local character = player.Character
+    if not character then return end
+    
+    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then return end
+    
+    local herbsFolder = Workspace:FindFirstChild("Herbs")
+    if not herbsFolder then return end
+    
+    local playerPos = humanoidRootPart.Position
+    local nearestHerb = nil
+    local nearestDistance = math.huge
+    
+    -- 找最近的草药
+    for _, herb in ipairs(herbsFolder:GetChildren()) do
+        -- 递归找ProximityPrompt
+        local function findProximityPrompt(obj)
+            for _, child in ipairs(obj:GetChildren()) do
+                if child:IsA("ProximityPrompt") then
+                    -- 修复：安全地获取草药位置
+                    local herbPos
+                    if obj:IsA("BasePart") then
+                        herbPos = obj.Position
+                    elseif obj:IsA("Model") then
+                        -- 对于Model，尝试获取PrimaryPart或任何BasePart
+                        if obj.PrimaryPart and obj.PrimaryPart:IsA("BasePart") then
+                            herbPos = obj.PrimaryPart.Position
+                        else
+                            -- 查找任何BasePart
+                            for _, part in ipairs(obj:GetChildren()) do
+                                if part:IsA("BasePart") then
+                                    herbPos = part.Position
+                                    break
+                                end
+                            end
+                        end
+                    end
+                    
+                    if herbPos then
+                        local distance = (herbPos - playerPos).Magnitude
+                        -- 如果在15个单位距离内
+                        if distance < 15 and distance < nearestDistance then
+                            nearestDistance = distance
+                            nearestHerb = child
+                        end
+                    end
+                    return
+                else
+                    findProximityPrompt(child)
+                end
+            end
+        end
+        
+        findProximityPrompt(herb)
+    end
+    
+    -- 如果找到最近的草药，就触发采摘
+    if nearestHerb then
+        fireproximityprompt(nearestHerb)
+    end
+end
+
+-- 开关自动采摘
+local function toggleAutoHarvest()
+    HerbState.autoHarvestEnabled = not HerbState.autoHarvestEnabled
+    
+    if HerbState.autoHarvestEnabled then
+        print("[自动采摘] 开启自动采摘 (0.1秒间隔)")
+        -- 每0.1秒检查一次附近的草药
+        HerbState.autoHarvestConnection = RunService.Heartbeat:Connect(function()
+            autoHarvestNearestHerb()
+            task.wait(0.1) -- 关键修复：添加0.1秒等待
+        end)
+    else
+        print("[自动采摘] 关闭自动采摘")
+        if HerbState.autoHarvestConnection then
+            HerbState.autoHarvestConnection:Disconnect()
+            HerbState.autoHarvestConnection = nil
+        end
+    end
+    
+    return HerbState.autoHarvestEnabled
+end
+
+-- ===================== 移动设备适配 =====================
+local MobileToggleButton = nil
+local MobileToggleGUI = nil
+
+local function createMobileToggle()
+    -- 清理旧按钮
+    if CoreGui:FindFirstChild("HerbMobileToggle") then
+        CoreGui.HerbMobileToggle:Destroy()
+    end
+    
+    -- 只在移动设备上显示按钮
+    if UserInputService.KeyboardEnabled and not UserInputService.TouchEnabled then
+        print("[移动端] 检测到键盘设备，隐藏移动端按钮")
+        return
+    end
+    
+    print("[移动端] 创建移动端切换按钮")
+    
+    local mobileToggleGUI = Instance.new("ScreenGui")
+    mobileToggleGUI.Name = "HerbMobileToggle"
+    mobileToggleGUI.Parent = CoreGui
+    mobileToggleGUI.ResetOnSpawn = false
+    mobileToggleGUI.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    mobileToggleGUI.DisplayOrder = 100
+    
+    local toggleButton = Instance.new("TextButton")
+    toggleButton.Name = "ToggleButton"
+    toggleButton.Parent = mobileToggleGUI
+    toggleButton.BackgroundColor3 = Color3.fromRGB(40, 60, 40)
+    toggleButton.BorderColor3 = Color3.fromRGB(29, 29, 35)
+    toggleButton.Position = UDim2.new(0.005, 0, 0.4, 0)
+    toggleButton.Size = UDim2.new(0, 80, 0, 36)
+    toggleButton.Font = Enum.Font.SourceSansBold
+    toggleButton.Text = "打开界面"
+    toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    toggleButton.TextSize = 14
+    toggleButton.Active = true
+    toggleButton.Draggable = true
+    toggleButton.Visible = true
+    
+    local buttonCorner = Instance.new("UICorner")
+    buttonCorner.CornerRadius = UDim.new(0, 5)
+    buttonCorner.Parent = toggleButton
+    
+    MobileToggleButton = toggleButton
+    MobileToggleGUI = mobileToggleGUI
+    
+    return mobileToggleGUI
+end
+
+-- ===================== 全新功法搜索系统 =====================
 local function scanAuras()
     print("[功法扫描] ======= 开始扫描功法 =======")
-    print("[功法扫描] 使用的功法列表:", #ValidAuraTypes, "种功法")
+    print("[功法扫描] 搜索方法: Workspace第一层Model，检查ProximityPrompt")
     
     local validAuras = {}
-    local currentTime = tick()
     
-    -- 清理过期的超时记录
-    for herb, timeoutTime in pairs(HerbState.timeoutHerbs) do
-        if currentTime - timeoutTime > CONFIG.TIMEOUT_COOLDOWN then
-            HerbState.timeoutHerbs[herb] = nil
-        end
-    end
-    
-    -- 1. 优先在功法文件夹中搜索
-    local auraFolders = {"Auras", "功法", "Gongfa", "Skills", "MartialArts"}
-    local foundInFolders = false
-    
-    for _, folderName in ipairs(auraFolders) do
-        local aurasFolder = Workspace:FindFirstChild(folderName)
-        if aurasFolder then
-            print("[功法扫描] 在功法文件夹中搜索: " .. folderName)
+    -- 只搜索Workspace的第一层对象
+    for _, child in ipairs(Workspace:GetChildren()) do
+        if child and child:IsA("Model") and child.Parent == Workspace then
+            -- 检查Model中是否有ProximityPrompt
+            local hasProximityPrompt = false
             
-            -- 遍历文件夹中的所有对象
-            for _, item in ipairs(aurasFolder:GetDescendants()) do
-                if item and item.Parent then
-                    -- 只处理BasePart或Model
-                    if item:IsA("BasePart") or item:IsA("Model") then
-                        if isValidAura(item) then
-                            -- 检查是否已采集
-                            local isCollected = false
-                            for collectedAura, _ in pairs(HerbState.collectedHerbs) do
-                                if collectedAura and collectedAura == item then
-                                    isCollected = true
-                                    break
-                                end
-                            end
-                            
-                            -- 检查是否超时
-                            local isTimedOut = false
-                            for timeoutAura, timeoutTime in pairs(HerbState.timeoutHerbs) do
-                                if timeoutAura and timeoutAura == item then
-                                    if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
-                                        isTimedOut = true
-                                    end
-                                    break
-                                end
-                            end
-                            
-                            local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == item) or 
-                                                   (AuraState.currentAura and AuraState.currentAura == item)
-                            
-                            if not isCollected and not isTimedOut and (not isCurrentTarget or not item.Parent) then
-                                table.insert(validAuras, item)
-                                foundInFolders = true
-                                print(string.format("[功法扫描] 找到功法: %s (类型: %s, 在文件夹: %s)", 
-                                    item.Name, item.ClassName, folderName))
-                            end
-                        end
-                    end
+            -- 搜索Model的直接子对象
+            for _, descendant in ipairs(child:GetChildren()) do
+                if descendant:IsA("ProximityPrompt") then
+                    hasProximityPrompt = true
+                    break
                 end
             end
-        end
-    end
-    
-    -- 2. 如果功法文件夹中没有找到，搜索整个Workspace
-    if not foundInFolders then
-        print("[功法扫描] 在功法文件夹中未找到有效功法，开始搜索整个Workspace...")
-        
-        -- 搜索第一层对象
-        for _, child in ipairs(Workspace:GetChildren()) do
-            if child and child.Parent then
-                -- 检查是否是模型或部件
-                if child:IsA("Model") or child:IsA("MeshPart") or child:IsA("Part") then
-                    -- 检查是否是有效功法
-                    if isValidAura(child) then
-                        -- 检查采集状态
-                        local isCollected = false
-                        for collectedAura, _ in pairs(HerbState.collectedHerbs) do
-                            if collectedAura and collectedAura == child then
-                                isCollected = true
-                                break
-                            end
-                        end
-                        
-                        local isTimedOut = false
-                        for timeoutAura, timeoutTime in pairs(HerbState.timeoutHerbs) do
-                            if timeoutAura and timeoutAura == child then
-                                if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
-                                    isTimedOut = true
-                                end
-                                break
-                            end
-                        end
-                        
-                        local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == child) or 
-                                               (AuraState.currentAura and AuraState.currentAura == child)
-                        
-                        if not isCollected and not isTimedOut and (not isCurrentTarget or not child.Parent) then
-                            table.insert(validAuras, child)
-                            print(string.format("[功法扫描] 在整个Workspace中找到功法: %s (类型: %s)", 
-                                child.Name, child.ClassName))
-                        end
-                    end
-                end
-            end
-        end
-        
-        -- 3. 如果第一层没找到，深度搜索
-        if #validAuras == 0 then
-            print("[功法扫描] 第一层未找到，开始深度搜索Workspace中的所有子对象...")
             
-            for _, descendant in ipairs(Workspace:GetDescendants()) do
-                if descendant and descendant.Parent then
-                    -- 只处理特定类型的对象
-                    if descendant:IsA("Model") or descendant:IsA("MeshPart") or descendant:IsA("Part") then
-                        -- 检查是否是有效功法
-                        if isValidAura(descendant) then
-                            -- 避免重复添加
-                            local alreadyAdded = false
-                            for _, addedAura in ipairs(validAuras) do
-                                if addedAura == descendant then
-                                    alreadyAdded = true
-                                    break
-                                end
-                            end
-                            
-                            if not alreadyAdded then
-                                -- 检查采集状态
-                                local isCollected = false
-                                for collectedAura, _ in pairs(HerbState.collectedHerbs) do
-                                    if collectedAura and collectedAura == descendant then
-                                        isCollected = true
-                                        break
-                                    end
-                                end
-                                
-                                local isTimedOut = false
-                                for timeoutAura, timeoutTime in pairs(HerbState.timeoutHerbs) do
-                                    if timeoutAura and timeoutAura == descendant then
-                                        if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
-                                            isTimedOut = true
-                                        end
-                                        break
-                                    end
-                                end
-                                
-                                local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == descendant) or 
-                                                       (AuraState.currentAura and AuraState.currentAura == descendant)
-                                
-                                if not isCollected and not isTimedOut and (not isCurrentTarget or not descendant.Parent) then
-                                    table.insert(validAuras, descendant)
-                                    print(string.format("[功法扫描] 深度搜索找到功法: %s (类型: %s, 路径: %s)", 
-                                        descendant.Name, descendant.ClassName, getFullPath(descendant)))
-                                end
-                            end
-                        end
-                    end
-                    -- 如果类型不符合，什么也不做，继续循环
-                end
+            if hasProximityPrompt then
+                table.insert(validAuras, child)
+                print(string.format("[功法扫描] 找到功法: %s (包含ProximityPrompt)", child.Name))
             end
         end
     end
     
     print(string.format("[功法扫描] 扫描完成，找到 %d 个有效功法", #validAuras))
-    
-    -- 按距离排序，返回最近的功法
-    if #validAuras > 0 then
-        local playerPos = humanoidRootPart.Position
-        table.sort(validAuras, function(a, b)
-            local posA = getHerbPosition(a)
-            local posB = getHerbPosition(b)
-            local distA = (posA - playerPos).Magnitude
-            local distB = (posB - playerPos).Magnitude
-            return distA < distB
-        end)
-        
-        -- 打印找到的功法信息
-        for i, aura in ipairs(validAuras) do
-            if i <= 5 then -- 只打印前5个
-                local pos = getHerbPosition(aura)
-                local distance = (pos - playerPos).Magnitude
-                print(string.format("[功法扫描] %d. %s (距离: %.1f米)", i, aura.Name, distance))
-            end
-        end
-    end
     
     return validAuras
 end
@@ -685,29 +617,40 @@ local function StopAllMovement()
 end
 
 local function enableFlight()
-    if HerbState.IsFlying or not humanoid or not humanoidRootPart then return end
+    if HerbState.IsFlying or not humanoid or not humanoidRootPart then 
+        print("[飞行] 飞行已启用或角色组件不存在")
+        return 
+    end
     
+    -- 确保之前的飞行组件已清理
+    StopAllMovement()
+    
+    print("[飞行] 启用飞行模式...")
+    
+    -- 设置角色状态
     humanoid.PlatformStand = true
     workspace.Gravity = HerbState.OriginalGravity * 0.1
     
+    -- 创建BodyVelocity
     local bodyVelocity = Instance.new("BodyVelocity")
     bodyVelocity.Name = "FlightVelocity"
-    bodyVelocity.MaxForce = Vector3.new(10000, 10000, 10000)
+    bodyVelocity.MaxForce = Vector3.new(100000, 100000, 100000)  -- 增加力度
     bodyVelocity.Velocity = Vector3.new(0, 0, 0)
-    bodyVelocity.P = 1000
+    bodyVelocity.P = 5000  -- 增加P值以获得更快的响应
     bodyVelocity.Parent = humanoidRootPart
     HerbState.FlightBodyVelocity = bodyVelocity
     
+    -- 创建BodyGyro
     local bodyGyro = Instance.new("BodyGyro")
     bodyGyro.Name = "FlightGyro"
-    bodyGyro.MaxTorque = Vector3.new(10000, 10000, 10000)
+    bodyGyro.MaxTorque = Vector3.new(100000, 100000, 100000)
     bodyGyro.CFrame = humanoidRootPart.CFrame
-    bodyGyro.P = 1000
-    bodyGyro.D = 500
+    bodyGyro.P = 3000
+    bodyGyro.D = 1000
     bodyGyro.Parent = humanoidRootPart
     HerbState.FlightBodyGyro = bodyGyro
     
-    local lastVelocity = Vector3.new(0, 0, 0)
+    -- 创建飞行连接器
     local lastUpdate = tick()
     HerbState.FlightConnection = RunService.Heartbeat:Connect(function()
         if not HerbState.IsFlying or not humanoidRootPart or not humanoidRootPart.Parent then
@@ -719,45 +662,154 @@ local function enableFlight()
         local deltaTime = currentTime - lastUpdate
         lastUpdate = currentTime
         
+        -- 稳定飞行高度
         local targetY = CONFIG.FLY_HEIGHT
         local currentY = humanoidRootPart.Position.Y
         local heightDifference = targetY - currentY
-        local yVelocity = 0
         
-        if math.abs(heightDifference) > 10 then
-            yVelocity = heightDifference * 2
-        elseif math.abs(heightDifference) > 1 then
-            yVelocity = heightDifference * 5
-        else
-            yVelocity = 0
+        -- 只有当BodyVelocity存在时才更新
+        if HerbState.FlightBodyVelocity and HerbState.FlightBodyVelocity.Parent then
+            local yVelocity = 0
+            if math.abs(heightDifference) > 10 then
+                yVelocity = heightDifference * 5
+            elseif math.abs(heightDifference) > 1 then
+                yVelocity = heightDifference * 10
+            end
+            
+            -- 保持当前水平速度，只调整垂直速度
+            HerbState.FlightBodyVelocity.Velocity = Vector3.new(
+                HerbState.FlightBodyVelocity.Velocity.X,
+                yVelocity,
+                HerbState.FlightBodyVelocity.Velocity.Z
+            )
         end
         
-        local smoothY = lastVelocity.Y * CONFIG.FLIGHT_STABILIZATION + yVelocity * (1 - CONFIG.FLIGHT_STABILIZATION)
-        
-        HerbState.FlightBodyVelocity.Velocity = Vector3.new(
-            HerbState.FlightBodyVelocity.Velocity.X,
-            smoothY,
-            HerbState.FlightBodyVelocity.Velocity.Z
-        )
-        
-        lastVelocity = HerbState.FlightBodyVelocity.Velocity
-        
+        -- 更新陀螺仪
         if HerbState.FlightBodyGyro then
             HerbState.FlightBodyGyro.CFrame = humanoidRootPart.CFrame
         end
     end)
     
     HerbState.IsFlying = true
-    print("[飞行] 飞行模式已启用")
+    print("[飞行] 飞行模式已启用，高度: " .. CONFIG.FLY_HEIGHT .. "米")
 end
 
-local function disableFlight()
-    if not HerbState.IsFlying then return end
-    StopAllMovement()
-    print("[飞行] 飞行模式已禁用")
+-- ===================== 修复：功法位置获取优化 =====================
+local function getHerbPosition(herb)
+    if not herb or not herb.Parent then
+        warn("[坐标] 对象不存在或已销毁")
+        return Vector3.new(0, 0, 0)
+    end
+    
+    -- 使用 pcall 安全执行所有操作
+    local success, position = pcall(function()
+        -- 方法1: 对于 BasePart，直接返回 Position
+        if herb:IsA("BasePart") then
+            return herb.Position
+        end
+        
+        -- 方法2: 对于 Model，尝试多种方式
+        if herb:IsA("Model") then
+            -- 2.1 检查 PrimaryPart
+            if herb.PrimaryPart and herb.PrimaryPart:IsA("BasePart") then
+                return herb.PrimaryPart.Position
+            end
+            
+            -- 2.2 尝试 GetPivot() 方法
+            local success2, pivotResult = pcall(function()
+                return herb:GetPivot()
+            end)
+            
+            if success2 and pivotResult then
+                if typeof(pivotResult) == "CFrame" then
+                    return pivotResult.Position
+                elseif typeof(pivotResult) == "Vector3" then
+                    return pivotResult
+                end
+            end
+            
+            -- 2.5 查找任何 BasePart 子对象
+            for _, child in ipairs(herb:GetChildren()) do
+                if child:IsA("BasePart") then
+                    return child.Position
+                end
+            end
+        end
+        
+        -- 如果所有方法都失败，返回默认位置
+        return Vector3.new(0, 0, 0)
+    end)
+    
+    if success and position then
+        return position
+    else
+        warn("[坐标] 获取对象位置时发生错误: " .. (herb and herb.Name or "未知对象") .. " - " .. tostring(position))
+        return Vector3.new(0, 0, 0)
+    end
+end
+
+local function getAuraPosition(auraModel)
+    if not auraModel or not auraModel.Parent then
+        warn("[功法坐标] 功法Model不存在或已销毁")
+        return Vector3.new(0, 0, 0)
+    end
+    
+    local success, result = pcall(function()
+        -- 首先尝试从Model本身获取位置
+        if auraModel:IsA("Model") then
+            -- 尝试使用GetPivot方法
+            local success2, pivotResult = pcall(function()
+                return auraModel:GetPivot()
+            end)
+            
+            if success2 and pivotResult and typeof(pivotResult) == "CFrame" then
+                return pivotResult.Position
+            end
+            
+            -- 尝试PrimaryPart
+            if auraModel.PrimaryPart and auraModel.PrimaryPart:IsA("BasePart") then
+                return auraModel.PrimaryPart.Position
+            end
+            
+            -- 查找任何BasePart子对象
+            for _, child in ipairs(auraModel:GetChildren()) do
+                if child:IsA("BasePart") then
+                    return child.Position
+                end
+            end
+        end
+        
+        -- 如果常规方法失败，尝试查找ProximityPrompt并获取其父级坐标
+        for _, child in ipairs(auraModel:GetDescendants()) do
+            if child:IsA("ProximityPrompt") then
+                local parent = child.Parent
+                if parent then
+                    if parent:IsA("BasePart") then
+                        return parent.Position
+                    elseif parent:IsA("Model") then
+                        local parentPos = parent.PrimaryPart and parent.PrimaryPart.Position
+                        if parentPos then
+                            return parentPos
+                        end
+                    end
+                end
+                break
+            end
+        end
+        
+        return Vector3.new(0, 0, 0)
+    end)
+    
+    if success and result then
+        return result
+    else
+        warn("[功法坐标] 获取功法位置时发生错误")
+        return Vector3.new(0, 0, 0)
+    end
 end
 
 local function getHerbAge(herb)
+    -- 这个函数只用于草药，功法不需要年龄
     if not herb or not herb.Parent then
         return 0
     end
@@ -768,7 +820,25 @@ local function getHerbAge(herb)
     
     local age = 0
     
-    -- 如果是Model，尝试查找其中的Age值
+    -- 只处理草药，功法不需要年龄
+    -- 检查是否是功法（包含ProximityPrompt的Model）
+    local isAura = false
+    if herb:IsA("Model") then
+        for _, child in ipairs(herb:GetChildren()) do
+            if child:IsA("ProximityPrompt") then
+                isAura = true
+                break
+            end
+        end
+    end
+    
+    if isAura then
+        -- 功法不需要年龄，直接返回0
+        HerbState.herbAgeCache[herb] = 0
+        return 0
+    end
+    
+    -- 以下是草药的年龄获取逻辑
     if herb:IsA("Model") then
         -- 查找Model中的Age属性或AgeValue
         local success, result = pcall(function()
@@ -823,136 +893,6 @@ local function getHerbPriority(herbName)
     return nil
 end
 
--- ===================== 修复：增强的获取位置函数 =====================
-local function getHerbPosition(herb)
-    if not herb or not herb.Parent then
-        warn("[坐标] 对象不存在或已销毁")
-        return Vector3.new(0, 0, 0)
-    end
-    
-    -- 方法1: 对于 BasePart，直接返回 Position
-    if herb:IsA("BasePart") then
-        return herb.Position
-    end
-    
-    -- 方法2: 对于 Model，尝试多种方式
-    if herb:IsA("Model") then
-        -- 2.1 检查 PrimaryPart
-        if herb.PrimaryPart and herb.PrimaryPart:IsA("BasePart") then
-            return herb.PrimaryPart.Position
-        end
-        
-        -- 2.2 尝试 GetPivot() 方法
-        local success, pivotResult = pcall(function()
-            return herb:GetPivot()
-        end)
-        
-        if success and pivotResult then
-            if typeof(pivotResult) == "CFrame" then
-                return pivotResult.Position
-            elseif typeof(pivotResult) == "Vector3" then
-                return pivotResult
-            end
-        end
-        
-        -- 2.3 检查 Pivot 子对象
-        local pivot = herb:FindFirstChild("Pivot")
-        if pivot then
-            -- Pivot 可能是 BasePart
-            if pivot:IsA("BasePart") then
-                return pivot.Position
-            end
-            
-            -- Pivot 可能有 WorldPivot 子对象
-            local worldPivot = pivot:FindFirstChild("WorldPivot")
-            if worldPivot then
-                if worldPivot:IsA("CFrameValue") then
-                    return worldPivot.Value.Position
-                elseif worldPivot:IsA("Vector3Value") then
-                    return worldPivot.Value
-                end
-            end
-        end
-        
-        -- 2.4 尝试 GetBoundingBox() 获取中心点
-        local success2, boundingBox = pcall(function()
-            return herb:GetBoundingBox()
-        end)
-        
-        if success2 and boundingBox then
-            return boundingBox.Position
-        end
-        
-        -- 2.5 查找任何 BasePart 子对象
-        for _, child in ipairs(herb:GetChildren()) do
-            if child:IsA("BasePart") then
-                return child.Position
-            end
-        end
-        
-        -- 2.6 深度搜索 BasePart
-        for _, descendant in ipairs(herb:GetDescendants()) do
-            if descendant:IsA("BasePart") then
-                return descendant.Position
-            end
-        end
-    end
-    
-    -- 方法3: 尝试通用属性
-    local success3, result = pcall(function()
-        if herb:IsA("BasePart") then
-            return herb.Position
-        elseif herb:FindFirstChild("Position") then
-            local posValue = herb.Position
-            if typeof(posValue) == "Vector3" then
-                return posValue
-            end
-        end
-        
-        -- 尝试获取 CFrame
-        local cframe = herb.CFrame
-        if cframe then
-            return cframe.Position
-        end
-        
-        return nil
-    end)
-    
-    if success3 and result then
-        return result
-    end
-    
-    -- 方法4: 最后尝试使用模型的 PrimaryPart 或第一个部件
-    if herb:IsA("Model") then
-        -- 再次尝试获取 PrimaryPart
-        if herb.PrimaryPart then
-            local success4, pos = pcall(function()
-                return herb.PrimaryPart.Position
-            end)
-            
-            if success4 then
-                return pos
-            end
-        end
-        
-        -- 查找任何部件
-        for _, child in pairs(herb:GetChildren()) do
-            if child:IsA("BasePart") then
-                local success5, pos = pcall(function()
-                    return child.Position
-                end)
-                
-                if success5 then
-                    return pos
-                end
-            end
-        end
-    end
-    
-    warn("[坐标] 无法获取对象位置: " .. herb.Name .. " (类型: " .. herb.ClassName .. ")")
-    return Vector3.new(0, 0, 0)
-end
-
 local function scanHerbs()
     local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
     if not herbsFolder then 
@@ -1003,6 +943,11 @@ local function scanHerbs()
             continue
         end
         
+        -- 如果开启了一键加速，修改采摘时间
+        if HerbState.quickPickEnabled then
+            modifySingleHerbPickTime(item)
+        end
+        
         -- 检查是否已采集
         local isCollected = false
         for collectedHerb, _ in pairs(HerbState.collectedHerbs) do
@@ -1034,7 +979,6 @@ local function scanHerbs()
                 -- 检查Model是否有PrimaryPart或者任何MeshPart/Part
                 if item.PrimaryPart or #item:GetChildren() > 0 then
                     table.insert(validHerbs, item)
-                    print(string.format("[扫描] 找到Model类型草药: %s", item.Name))
                 end
             else
                 table.insert(validHerbs, item)
@@ -1042,57 +986,7 @@ local function scanHerbs()
         end
     end
     
-    -- 如果未找到草药，尝试深度搜索
-    if #validHerbs == 0 then
-        local allHerbs = {}
-        local function deepSearch(folder)
-            for _, child in ipairs(folder:GetChildren()) do
-                if child:IsA("Folder") or child:IsA("Model") then
-                    deepSearch(child)
-                elseif (child:IsA("MeshPart") or child:IsA("Part")) then
-                    -- 检查是否是黑名单草药
-                    local isBlacklisted = false
-                    for _, blacklistName in ipairs(CONFIG.BLACKLIST_HERBS) do
-                        if child.Name == blacklistName or child.Name:match(blacklistName) then
-                            isBlacklisted = true
-                            print(string.format("[深度扫描] 跳过黑名单草药: %s", child.Name))
-                            break
-                        end
-                    end
-                    
-                    if isBlacklisted then
-                        continue
-                    end
-                    
-                    local herbKeywords = {"Herb", "Plant", "草药", "药草", "采集物"}
-                    for _, keyword in ipairs(herbKeywords) do
-                        if child.Name:match(keyword) then
-                            table.insert(allHerbs, child)
-                            break
-                        end
-                    end
-                end
-            end
-        end
-        
-        deepSearch(Workspace)
-        
-        if #allHerbs > 0 then
-            print(string.format("[深度扫描] 找到 %d 个可能草药", #allHerbs))
-            validHerbs = allHerbs
-        end
-    end
-    
     print(string.format("[扫描] 找到有效草药数量：%d", #validHerbs))
-    
-    -- 打印找到的草药列表（调试用）
-    if #validHerbs > 0 then
-        for i, herb in ipairs(validHerbs) do
-            if i <= 10 then  -- 只打印前10个
-                print(string.format("[扫描] 草药 %d: %s", i, herb.Name))
-            end
-        end
-    end
     
     return validHerbs
 end
@@ -1141,16 +1035,18 @@ local function findBestTarget()
             -- 按距离排序，选择最近的功法
             local closestAura = nil
             local closestDistance = math.huge
-            local playerPos = humanoidRootPart.Position
+            local playerPos = humanoidRootPart and humanoidRootPart.Position or Vector3.new(0, 0, 0)
             
             for _, aura in ipairs(allAuras) do
                 if aura and aura.Parent then
-                    local auraPos = getHerbPosition(aura)
-                    local distance = (auraPos - playerPos).Magnitude
-                    
-                    if distance < closestDistance then
-                        closestDistance = distance
-                        closestAura = aura
+                    local auraPos = getAuraPosition(aura)
+                    if auraPos and auraPos ~= Vector3.new(0, 0, 0) then  -- 确保获取到了有效位置
+                        local distance = (auraPos - playerPos).Magnitude
+                        
+                        if distance < closestDistance then
+                            closestDistance = distance
+                            closestAura = aura
+                        end
                     end
                 end
             end
@@ -1300,54 +1196,153 @@ local function findBestTarget()
 end
 
 local function flyToTarget(target, isAura)
-    if not target or not HerbState.IsFlying or not HerbState.FlightBodyVelocity then 
-        warn("[飞行] 飞行组件未初始化或目标不存在")
+    if not target or not HerbState.IsFlying then 
+        warn("[飞行] 飞行模式未启用或目标不存在")
         return false 
+    end
+    
+    -- 确保飞行组件存在
+    if not HerbState.FlightBodyVelocity or not HerbState.FlightBodyVelocity.Parent then
+        print("[飞行] 飞行组件不存在，重新创建")
+        enableFlight()
+        task.wait(0.5) -- 等待飞行组件初始化
     end
 
     local targetType = isAura and "功法" or "草药"
     print(string.format("[飞行] 开始前往%s：%s", targetType, target.Name))
     local startTime = tick()
+    
+    -- 重置飞行组件速度
+    if HerbState.FlightBodyVelocity then
+        HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+    end
+
+    -- 飞行到达调试计数器
+    local checkCount = 0
+    local lastDistance = math.huge
+    local stagnantCount = 0  -- 停滞计数器
 
     while HerbState.isRunning and target and target.Parent do
-        -- 添加额外的安全检查
+        -- 安全检查
         if not HerbState.FlightBodyVelocity or not HerbState.FlightBodyVelocity.Parent then
-            warn("[飞行] 飞行组件已销毁，终止飞行")
-            return false
+            warn("[飞行] 飞行组件已销毁，重新创建")
+            enableFlight()
+            task.wait(0.5)
         end
         
+        -- 超时检查
         if tick() - startTime > CONFIG.MOVE_TIMEOUT then
             warn("[飞行] 前往" .. targetType .. "超时（超过" .. CONFIG.MOVE_TIMEOUT .. "秒）")
-            HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+            if HerbState.FlightBodyVelocity then
+                HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+            end
             HerbState.timeoutHerbs[target] = tick()
             HerbState.currentTimeoutCount = HerbState.currentTimeoutCount + 1
             print("[飞行] 已将" .. targetType .. " " .. target.Name .. " 加入超时列表")
             return false
         end
 
-        local targetPos = getHerbPosition(target)
+        -- 安全地获取目标位置
+        local targetPos = nil
+        if isAura then
+            targetPos = getAuraPosition(target)
+        else
+            targetPos = getHerbPosition(target)
+        end
+        
+        -- 检查是否成功获取到位置
+        if not targetPos or targetPos == Vector3.new(0, 0, 0) then
+            warn("[飞行] 无法获取" .. targetType .. "位置: " .. target.Name)
+            HerbState.timeoutHerbs[target] = tick()
+            HerbState.currentTimeoutCount = HerbState.currentTimeoutCount + 1
+            return false
+        end
+        
+        -- 飞行高度调整
         local flyHeight = isAura and CONFIG.FLY_HEIGHT * 1.2 or CONFIG.FLY_HEIGHT
         local targetFlyPos = Vector3.new(targetPos.X, flyHeight, targetPos.Z)
-        local direction = (targetFlyPos - humanoidRootPart.Position).Unit
-        local distance = (targetFlyPos - humanoidRootPart.Position).Magnitude
+        local currentPos = humanoidRootPart.Position
+        local distance = (targetFlyPos - currentPos).Magnitude
+        
+        -- 每10次检查打印一次距离信息
+        checkCount = checkCount + 1
+        if checkCount % 10 == 0 then
+            print(string.format("[飞行] 当前距离: %.2f米，目标高度: %.2f，当前位置: %.2f", 
+                distance, targetFlyPos.Y, currentPos.Y))
+        end
 
+        -- 到达判断
         if distance <= CONFIG.MOVE_DISTANCE_THRESHOLD then
-            HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+            if HerbState.FlightBodyVelocity then
+                HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+            end
             HerbState.currentTimeoutCount = 0
             print(string.format("[飞行] 到达%s %s 正上方（距离：%.1f米）", targetType, target.Name, distance))
             return true
         end
+        
+        -- 检查距离是否在减少
+        if distance >= lastDistance - 0.1 then
+            stagnantCount = stagnantCount + 1
+        else
+            stagnantCount = 0
+        end
+        
+        lastDistance = distance
+        
+        -- 如果停滞超过20次，尝试重新计算方向或强制到达
+        if stagnantCount > 20 then
+            print(string.format("[飞行] 飞行停滞，尝试调整 (停滞次数: %d)", stagnantCount))
+            
+            if distance < 50 then  -- 如果已经很近了，直接认为到达
+                if HerbState.FlightBodyVelocity then
+                    HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+                end
+                HerbState.currentTimeoutCount = 0
+                print("[飞行] 飞行停滞但距离较近，认为已到达")
+                return true
+            end
+            
+            -- 重置停滞计数器
+            stagnantCount = 0
+        end
 
-        HerbState.FlightBodyVelocity.Velocity = Vector3.new(
-            direction.X * CONFIG.FLY_SPEED,
-            HerbState.FlightBodyVelocity.Velocity.Y,
-            direction.Z * CONFIG.FLY_SPEED
+        -- 关键修复：确保飞行速度正确应用
+        local direction = (targetFlyPos - currentPos).Unit
+        
+        -- 调整垂直速度
+        local verticalSpeed = 0
+        local heightDiff = targetFlyPos.Y - currentPos.Y
+        
+        if math.abs(heightDiff) > 10 then
+            verticalSpeed = math.clamp(heightDiff * 2, -80, 80)
+        end
+        
+        -- 应用飞行速度
+        local horizontalSpeed = CONFIG.FLY_SPEED
+        local velocity = Vector3.new(
+            direction.X * horizontalSpeed,
+            verticalSpeed,
+            direction.Z * horizontalSpeed
         )
         
-        -- 使用task.wait代替RunService.Heartbeat:Wait()以获得更好的控制
+        -- 确保BodyVelocity存在并设置速度
+        if HerbState.FlightBodyVelocity then
+            HerbState.FlightBodyVelocity.Velocity = velocity
+            if checkCount % 30 == 0 then
+                print(string.format("[飞行] 设置速度向量: (%.1f, %.1f, %.1f)，速度大小: %.1f", 
+                    velocity.X, velocity.Y, velocity.Z, velocity.Magnitude))
+            end
+        else
+            warn("[飞行] FlightBodyVelocity不存在")
+            return false
+        end
+        
+        -- 等待一帧
         task.wait()
     end
 
+    -- 清理飞行状态
     if HerbState.FlightBodyVelocity and HerbState.FlightBodyVelocity.Parent then
         HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
     end
@@ -1362,6 +1357,7 @@ local function flyToTarget(target, isAura)
     return false
 end
 
+-- ===================== 修复功法下降：确保下降到正确高度 =====================
 local function descendToCollectHeight(target, isAura)
     if not target or not target.Parent then 
         warn("[下降] 目标不存在，无法下降")
@@ -1371,47 +1367,124 @@ local function descendToCollectHeight(target, isAura)
     local targetType = isAura and "功法" or "草药"
     print("[高度] 开始下降到" .. targetType .. "采集高度")
     
+    -- 确保角色状态
+    if not humanoid or not humanoidRootPart then
+        warn("[下降] 角色组件缺失")
+        return false
+    end
+    
+    -- 停止所有飞行运动
+    if HerbState.FlightBodyVelocity and HerbState.FlightBodyVelocity.Parent then
+        HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
+    end
+    
+    if HerbState.FlightBodyGyro and HerbState.FlightBodyGyro.Parent then
+        HerbState.FlightBodyGyro:Destroy()
+        HerbState.FlightBodyGyro = nil
+    end
+    
+    -- 解除飞行状态
+    HerbState.IsFlying = false
     if HerbState.FlightConnection then
         HerbState.FlightConnection:Disconnect()
         HerbState.FlightConnection = nil
     end
     
-    HerbState.FlightBodyVelocity.Velocity = Vector3.new(0, 0, 0)
-    
-    if HerbState.FlightBodyGyro then
-        HerbState.FlightBodyGyro:Destroy()
-        HerbState.FlightBodyGyro = nil
+    -- 设置正常重力
+    workspace.Gravity = HerbState.OriginalGravity
+
+    -- 获取目标位置（关键修复）
+    local targetPos = Vector3.new(0, 0, 0)
+    if isAura then
+        targetPos = getAuraPosition(target)
+        print("[功法下降] 获取功法原始位置: " .. tostring(targetPos))
+        
+        -- 如果获取不到有效位置，尝试替代方法
+        if targetPos == Vector3.new(0, 0, 0) then
+            print("[功法下降] 尝试替代方法获取功法位置")
+            
+            -- 方法1：直接使用模型位置
+            if target:IsA("Model") then
+                if target.PrimaryPart then
+                    targetPos = target.PrimaryPart.Position
+                else
+                    -- 查找任何BasePart
+                    for _, child in ipairs(target:GetChildren()) do
+                        if child:IsA("BasePart") then
+                            targetPos = child.Position
+                            break
+                        end
+                    end
+                end
+            end
+            
+            print("[功法下降] 替代方法获取的位置: " .. tostring(targetPos))
+        end
+    else
+        targetPos = getHerbPosition(target)
     end
     
-    workspace.Gravity = HerbState.OriginalGravity * 0.8
-
-    local targetPos = getHerbPosition(target)
-    local targetHeight = isAura and targetPos.Y + CONFIG.NORMAL_HEIGHT_OFFSET * 2 or targetPos.Y + CONFIG.NORMAL_HEIGHT_OFFSET
+    -- 检查是否获取到有效位置
+    if targetPos == Vector3.new(0, 0, 0) then
+        warn("[下降] 无法获取目标位置，使用当前位置")
+        targetPos = humanoidRootPart.Position
+    end
+    
+    -- 关键修复：确保下降高度正确
+    -- 功法应该下降到目标位置上方5个单位
+    local targetHeight = targetPos.Y + CONFIG.NORMAL_HEIGHT_OFFSET
+    print(string.format("[下降] 目标原始Y: %.2f，目标高度Y: %.2f，偏移: %d", 
+        targetPos.Y, targetHeight, CONFIG.NORMAL_HEIGHT_OFFSET))
+    
+    -- 如果目标高度比当前位置还高，则稍微调整
+    if targetHeight > humanoidRootPart.Position.Y then
+        print("[下降] 目标高度高于当前位置，调整下降目标")
+        targetHeight = humanoidRootPart.Position.Y - 10  -- 下降10米
+    end
+    
     local finalTargetPos = Vector3.new(targetPos.X, targetHeight, targetPos.Z)
+    
+    print("[下降] 最终目标位置: " .. tostring(finalTargetPos))
+    print("[下降] 当前玩家位置: " .. tostring(humanoidRootPart.Position))
 
+    -- 禁用飞行平台站立
+    humanoid.PlatformStand = false
+    humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    humanoidRootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    
+    -- 使用Tween平滑下降
     local tweenCompleted = false
     local tween = TweenService:Create(
         humanoidRootPart,
         TweenInfo.new(CONFIG.HEIGHT_TWEEN_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
         {Position = finalTargetPos}
     )
-    tween.Completed:Connect(function() tweenCompleted = true end)
+    
+    tween.Completed:Connect(function()
+        tweenCompleted = true
+        print("[下降] Tween动画完成，最终位置: " .. tostring(humanoidRootPart.Position))
+    end)
+    
     tween:Play()
 
-    local waitTime = 0
-    while not tweenCompleted and waitTime < CONFIG.HEIGHT_TWEEN_TIME * 2 do
-        waitTime += task.wait(0.1)
+    -- 等待下降完成
+    local waitStart = tick()
+    while not tweenCompleted and tick() - waitStart < CONFIG.HEIGHT_TWEEN_TIME * 3 do
+        task.wait(0.1)
     end
+    
     if not tweenCompleted then
-        warn("[高度] 下降动画超时，强制设置位置")
+        warn("[下降] 下降动画超时，强制设置位置")
         tween:Cancel()
         humanoidRootPart.Position = finalTargetPos
     end
-
+    
+    -- 确保角色站立
     humanoid.PlatformStand = false
     humanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
     
-    print("[高度] 已下降到" .. targetType .. "采集高度（" .. targetHeight .. "米），等待用户采集")
+    print(string.format("[高度] 已下降到%s采集高度（%.2f米），等待用户采集", 
+        targetType, targetHeight))
     return true
 end
 
@@ -1507,7 +1580,7 @@ local function findAlternativeTarget(excludeTarget, excludeIsAura)
                     end
                     
                     if not isTimedOut then
-                        local auraPos = getHerbPosition(aura)
+                        local auraPos = getAuraPosition(aura)
                         local currentPos = excludeTarget and getHerbPosition(excludeTarget) or humanoidRootPart.Position
                         local distance = (auraPos - currentPos).Magnitude
                         
@@ -1639,6 +1712,7 @@ local function resetScanState()
     HerbState.collectedHerbs = {}
     HerbState.timeoutHerbs = {}
     HerbState.herbAgeCache = {}
+    HerbState.modifiedHerbs = {}  -- 也重置修改记录
     
     print("[重置] 扫描状态已重置")
 end
@@ -1662,25 +1736,36 @@ local function mainLoop()
     HerbState.failCount = 0
 
     while HerbState.isRunning do
-        -- 每次循环开始前检查系统是否仍在运行
         if not HerbState.isRunning then
             break
         end
         
-        -- 重置当前目标，强制重新搜索
         HerbState.currentHerb = nil
         AuraState.currentAura = nil
         
-        -- 清理已采集的草药记录，确保重新扫描时能找到新草药
+        -- 清理已采集的草药记录
         HerbState.collectedHerbs = {}
         
         print("[主流程] 重新扫描草药列表...")
-        local bestTarget, isAura = findBestTarget()
+        
+        -- 寻找目标
+        local success, bestTarget, isAura = pcall(function()
+            return findBestTarget()
+        end)
+        
+        if not success then
+            print("[主流程] 寻找目标时发生错误，5秒后重试")
+            warn("[主流程] 错误详情: " .. tostring(bestTarget))
+            
+            disableFlight()
+            task.wait(5)
+            continue
+        end
+        
         if not bestTarget then
             print("[主流程] 未找到任何目标，5秒后重试")
             disableFlight()
             
-            -- 检查是否需要退出
             for i = 1, 50 do
                 if not HerbState.isRunning then
                     break
@@ -1690,7 +1775,6 @@ local function mainLoop()
             continue
         end
         
-        -- 检查系统是否仍在运行
         if not HerbState.isRunning then
             break
         end
@@ -1704,16 +1788,36 @@ local function mainLoop()
             print(string.format("[主流程] 选择草药：%s%s", bestTarget.Name, priority and " [优先级" .. priority .. "]" or ""))
         end
 
+        -- 启用飞行
         enableFlight()
         
-        -- 检查系统是否仍在运行
+        -- 等待飞行完全启用
+        for i = 1, 10 do
+            if not HerbState.isRunning then break end
+            if HerbState.IsFlying and HerbState.FlightBodyVelocity then break end
+            task.wait(0.1)
+        end
+        
         if not HerbState.isRunning then
             break
         end
         
+        if not HerbState.IsFlying then
+            print("[主流程] 飞行模式未能启用，重新尝试")
+            enableFlight()
+            task.wait(1)
+        end
+        
+        if not HerbState.IsFlying then
+            print("[主流程] 飞行模式仍然未启用，跳过当前目标")
+            task.wait(2)
+            continue
+        end
+        
+        -- 飞行到目标
+        print("[主流程] 开始飞行到目标...")
         local reachSuccess = flyToTarget(bestTarget, isAura)
         
-        -- 检查系统是否仍在运行
         if not HerbState.isRunning then
             disableFlight()
             break
@@ -1752,13 +1856,17 @@ local function mainLoop()
             end
         end
 
-        -- 检查系统是否仍在运行
+        print("[主流程] 飞行到达成功，准备下降...")
+        
         if not HerbState.isRunning then
             disableFlight()
             break
         end
         
+        -- 执行下降
+        print("[主流程] 开始下降到采集高度...")
         local descendSuccess = descendToCollectHeight(bestTarget, isAura)
+        
         if not descendSuccess then
             print("[主流程] 下降失败，寻找替代目标...")
             
@@ -1787,12 +1895,12 @@ local function mainLoop()
             end
         end
 
-        -- 检查系统是否仍在运行
         if not HerbState.isRunning then
             disableFlight()
             break
         end
         
+        print("[主流程] 下降完成，等待用户采集...")
         local collectSuccess = waitForPlayerCollect(bestTarget, isAura)
         
         if collectSuccess then
@@ -1801,11 +1909,9 @@ local function mainLoop()
                 ascendToFlyHeight()
             end
             
-            -- 采集成功后，立即清除当前目标，确保下次循环重新扫描
             HerbState.currentHerb = nil
             AuraState.currentAura = nil
             
-            -- 短暂延迟后继续下一次循环
             task.wait(0.5)
             continue
         else
@@ -1857,7 +1963,6 @@ local function mainLoop()
     print("[主流程] 已停止")
 end
 
-
 local function startHerbSystem()
     if HerbState.isRunning then
         print("[系统] 系统已经在运行中")
@@ -1891,6 +1996,14 @@ local function startHerbSystem()
     
     HerbState.isRunning = true
     
+    -- 修复：启动系统时不改变目标模式，保持当前设置
+    print("[系统] 启动系统，当前目标模式: " .. HerbState.targetMode)
+    
+    -- 如果开启了一键加速，重新设置监听器
+    if HerbState.quickPickEnabled then
+        setupQuickPickListener()
+    end
+    
     -- 使用task.spawn替代coroutine，更稳定
     task.spawn(function()
         mainLoop()
@@ -1917,115 +2030,6 @@ local function stopHerbSystem()
     
     print("[系统] 系统已停止")
     return true
-end
-
--- ===================== 炼药功能 =====================
-local function startCraftPills(pillType, count)
-    if PillState.isCrafting then
-        print("[炼药] 炼药已在运行中")
-        return false
-    end
-    
-    if not pillType or pillType == "" then
-        print("[炼药] 请选择丹药类型")
-        return false
-    end
-    
-    -- 检查炼药事件是否存在
-    if not CraftPillEvent or not CraftPillEvent.FireServer then
-        print("[炼药] 错误: 炼药事件未找到或无效")
-        return false
-    end
-    
-    count = math.max(1, tonumber(count) or 1)
-    
-    print(string.format("[炼药] 开始炼制 %s x%d (间隔: %d秒)", pillType, count, PillState.craftInterval))
-    
-    PillState.isCrafting = true
-    PillState.currentPillType = pillType
-    PillState.craftCount = count
-    
-    task.spawn(function()
-        local crafted = 0
-        
-        while PillState.isCrafting and crafted < count do
-            -- 再次安全检查
-            if not CraftPillEvent or not CraftPillEvent.FireServer then
-                print("[炼药] 错误: 炼药事件丢失，停止炼药")
-                break
-            end
-            
-            -- 使用pcall安全调用
-            local success, err = pcall(function()
-                CraftPillEvent:FireServer(pillType)
-            end)
-            
-            if not success then
-                print("[炼药] 触发远程炼药事件失败: " .. tostring(err))
-                break
-            end
-            
-            crafted = crafted + 1
-            
-            print(string.format("[炼药] 触发远程炼药事件 (%d/%d) - 时间: %s", 
-                crafted, count, os.date("%H:%M:%S")))
-            
-            -- 只有不是最后一次时才等待
-            if crafted < count then
-                -- 使用真正的等待时间
-                local waitStart = tick()
-                while PillState.isCrafting and tick() - waitStart < PillState.craftInterval do
-                    task.wait(0.1) -- 每0.1秒检查一次，避免长时间阻塞
-                end
-            end
-        end
-        
-        -- 炼药完成后重置状态
-        if PillState.isCrafting then
-            PillState.isCrafting = false
-            print(string.format("[炼药] 炼药完成，共炼制 %d 次", crafted))
-        end
-    end)
-    
-    return true
-end
-
-local function stopCraftPills()
-    if not PillState.isCrafting then
-        print("[炼药] 炼药未在运行")
-        return false
-    end
-    
-    PillState.isCrafting = false
-    
-    print("[炼药] 炼药已停止")
-    return true
-end
-
-local function craftSinglePill(pillType)
-    if not pillType or pillType == "" then
-        print("[炼药] 请选择丹药类型")
-        return false
-    end
-    
-    -- 检查炼药事件是否存在
-    if not CraftPillEvent or not CraftPillEvent.FireServer then
-        print("[炼药] 错误: 炼药事件未找到或无效")
-        return false
-    end
-    
-    -- 使用pcall安全调用
-    local success, err = pcall(function()
-        CraftPillEvent:FireServer(pillType)
-    end)
-    
-    if success then
-        print(string.format("[炼药] 触发单次炼药事件 - 时间: %s", os.date("%H:%M:%S")))
-    else
-        print("[炼药] 触发单次炼药事件失败: " .. tostring(err))
-    end
-    
-    return success
 end
 
 -- ===================== 从ReplicatedStorage.Herbs加载草药类型 =====================
@@ -2091,11 +2095,6 @@ local function loadHerbTypesFromReplicatedStorage()
     HerbState.availableHerbTypes = herbsList
     
     print("[草药列表] 已加载 " .. #herbsList .. " 种草药类型")
-    
-    -- 打印所有草药类型
-    for i, herbName in ipairs(herbsList) do
-        print(string.format("[草药列表] %d. %s", i, herbName))
-    end
     
     return herbsList
 end
@@ -2165,7 +2164,7 @@ local function createPrioritySelectionUI()
     local selectionLabel = Instance.new("TextLabel")
     selectionLabel.Name = "SelectionLabel"
     selectionLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
-    selectionLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 1000)
+    selectionLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 100)
     selectionLabel.BackgroundTransparency = 1
     selectionLabel.Text = "已选择: 0/" .. CONFIG.MAX_PRIORITY_HERBS
     selectionLabel.TextColor3 = Color3.fromRGB(200, 255, 200)
@@ -2971,7 +2970,7 @@ local function createPillUI()
         local count = tonumber(countTextBox.Text) or 1
         local interval = tonumber(intervalTextBox.Text) or 3
         
-        count = math.max(1, math.min(1000, count)) -- 限制1-100次
+        count = math.max(1, math.min(1000, count)) -- 限制1-1000次
         interval = math.max(1, math.min(60, interval)) -- 限制1-60秒
         
         PillState.craftCount = count
@@ -3042,7 +3041,7 @@ local function createPillUI()
     return screenGui
 end
 
--- ===================== 创建主UI =====================
+-- ===================== 创建主UI（已移除新功能标签，功能并入草药系统） =====================
 local MainUI = nil
 local CurrentTab = "herb" -- 当前选中的标签
 local UIUpdateConnection = nil
@@ -3185,7 +3184,7 @@ local function createMainUI()
     pillContentFrame.BackgroundTransparency = 1
     pillContentFrame.Visible = false
     
-    -- ===================== 草药内容 =====================
+    -- ===================== 草药内容（已包含新功能） =====================
     local herbStatusLabel = Instance.new("TextLabel")
     herbStatusLabel.Name = "HerbStatusLabel"
     herbStatusLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
@@ -3252,12 +3251,36 @@ local function createMainUI()
     herbResetButton.TextSize = UI.BUTTON_TEXT_SIZE
     herbResetButton.BorderSizePixel = 0
     
+    -- 新增：一键加速按钮
+    local herbQuickPickButton = Instance.new("TextButton")
+    herbQuickPickButton.Name = "HerbQuickPickButton"
+    herbQuickPickButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
+    herbQuickPickButton.Position = UDim2.new(0.525, 0, 0, 135)
+    herbQuickPickButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
+    herbQuickPickButton.Text = "一键加速"
+    herbQuickPickButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    herbQuickPickButton.Font = Enum.Font.SourceSansBold
+    herbQuickPickButton.TextSize = UI.BUTTON_TEXT_SIZE
+    herbQuickPickButton.BorderSizePixel = 0
+    
+    -- 新增：自动采摘按钮
+    local herbAutoHarvestButton = Instance.new("TextButton")
+    herbAutoHarvestButton.Name = "HerbAutoHarvestButton"
+    herbAutoHarvestButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
+    herbAutoHarvestButton.Position = UDim2.new(0.025, 0, 0, 180)
+    herbAutoHarvestButton.BackgroundColor3 = Color3.fromRGB(150, 70, 70)
+    herbAutoHarvestButton.Text = "自动采摘"
+    herbAutoHarvestButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    herbAutoHarvestButton.Font = Enum.Font.SourceSansBold
+    herbAutoHarvestButton.TextSize = UI.BUTTON_TEXT_SIZE
+    herbAutoHarvestButton.BorderSizePixel = 0
+    
     local herbInfoLabel = Instance.new("TextLabel")
     herbInfoLabel.Name = "HerbInfoLabel"
-    herbInfoLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 60)
-    herbInfoLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 1, -70)
+    herbInfoLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 80)
+    herbInfoLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 1, -90)
     herbInfoLabel.BackgroundTransparency = 1
-    herbInfoLabel.Text = "提示: 自动寻找并采集草药\n支持优先级草药设置\n点击设置优先级选择优先采集的草药"
+    herbInfoLabel.Text = "提示: 自动寻找并采集草药\n支持优先级草药设置\n一键加速: 开启后秒采草药\n自动采摘: 靠近草药自动采集"
     herbInfoLabel.TextColor3 = Color3.fromRGB(180, 180, 255)
     herbInfoLabel.Font = Enum.Font.SourceSans
     herbInfoLabel.TextSize = UI.SMALL_TEXT_SIZE
@@ -3531,8 +3554,7 @@ local function createMainUI()
         if HerbState.isRunning then
             stopHerbSystem()
         else
-            -- 确保目标模式为草药优先
-            HerbState.targetMode = "herb"
+            -- 修复：启动系统时不强制改变目标模式
             startHerbSystem()
         end
     end)
@@ -3540,6 +3562,30 @@ local function createMainUI()
     herbResetButton.MouseButton1Click:Connect(function()
         print("[UI] 重置扫描状态")
         resetScanState()
+    end)
+    
+    -- 一键加速按钮事件
+    herbQuickPickButton.MouseButton1Click:Connect(function()
+        local enabled = toggleQuickPick()
+        if enabled then
+            herbQuickPickButton.Text = "关闭加速"
+            herbQuickPickButton.BackgroundColor3 = Color3.fromRGB(0, 180, 0)
+        else
+            herbQuickPickButton.Text = "一键加速"
+            herbQuickPickButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
+        end
+    end)
+    
+    -- 自动采摘按钮事件
+    herbAutoHarvestButton.MouseButton1Click:Connect(function()
+        local enabled = toggleAutoHarvest()
+        if enabled then
+            herbAutoHarvestButton.Text = "关闭自动"
+            herbAutoHarvestButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        else
+            herbAutoHarvestButton.Text = "自动采摘"
+            herbAutoHarvestButton.BackgroundColor3 = Color3.fromRGB(150, 70, 70)
+        end
     end)
     
     -- 功法按钮事件
@@ -3673,6 +3719,8 @@ local function createMainUI()
     herbPriorityButton.Parent = herbContentFrame
     herbToggleButton.Parent = herbContentFrame
     herbResetButton.Parent = herbContentFrame
+    herbQuickPickButton.Parent = herbContentFrame
+    herbAutoHarvestButton.Parent = herbContentFrame
     herbInfoLabel.Parent = herbContentFrame
     
     auraStatusLabel.Parent = auraContentFrame
@@ -3769,6 +3817,26 @@ local function createMainUI()
                 end
             end
             
+            if herbQuickPickButton then
+                if HerbState.quickPickEnabled then
+                    herbQuickPickButton.Text = "关闭加速"
+                    herbQuickPickButton.BackgroundColor3 = Color3.fromRGB(0, 180, 0)
+                else
+                    herbQuickPickButton.Text = "一键加速"
+                    herbQuickPickButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
+                end
+            end
+            
+            if herbAutoHarvestButton then
+                if HerbState.autoHarvestEnabled then
+                    herbAutoHarvestButton.Text = "关闭自动"
+                    herbAutoHarvestButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+                else
+                    herbAutoHarvestButton.Text = "自动采摘"
+                    herbAutoHarvestButton.BackgroundColor3 = Color3.fromRGB(150, 70, 70)
+                end
+            end
+            
             -- 功法UI更新
             if auraTargetLabel then
                 if AuraState.currentAura and AuraState.currentAura.Parent then
@@ -3849,19 +3917,20 @@ end
 
 -- ===================== 主初始化 =====================
 print("=== 多功能采集系统 ===")
-print("版本: 修复优化版")
+print("版本: 完整功能修复版")
 print("主要功能:")
-print("1. 草药系统: 优先级草药选择 (已加载 " .. #HerbState.availableHerbTypes .. " 种草药)")
-print("2. 功法系统: 优先采集功法 (已加载 " .. #ValidAuraTypes .. " 种功法类型)")
+print("1. 草药系统: 优先级草药选择 + 一键加速 + 自动采摘")
+print("2. 功法系统: 修复下降问题，优化搜索")
 print("3. 修炼系统: 自动突破 (间隔: " .. CONFIG.BREAKTHROUGH_INTERVAL .. "秒)")
 print("4. 炼药系统: 独立设置界面 (支持 " .. #CONFIG.PILL_TYPES .. " 种丹药)")
-print("5. 移动设备适配: " .. (UserInputService.TouchEnabled and "已启用" or "未启用"))
 
 print("\n系统已启动:")
 print("- 主界面: 屏幕左上角")
 print("- 移动设备: 左侧有打开/关闭按钮")
 print("- 四个独立系统: 草药、功法、修炼、炼药")
-print("- 日志级别: 详细 (可在代码中调整)")
+print("- 功法下降已修复: 使用与草药相同的方法")
+print("- 一键加速: 开关模式，开启后秒采草药 (修复了新草药同步)")
+print("- 自动采摘: 已修复PrimaryPart错误，0.1秒触发间隔")
 
 -- 预加载草药类型
 loadHerbTypesFromReplicatedStorage()
@@ -3904,6 +3973,16 @@ player.CharacterAdded:Connect(function(newChar)
     -- 重置炼药状态
     if PillState.isCrafting then
         stopCraftPills()
+    end
+    
+    -- 重置自动采摘
+    if HerbState.autoHarvestEnabled then
+        toggleAutoHarvest()
+    end
+    
+    -- 重置一键加速
+    if HerbState.quickPickEnabled then
+        toggleQuickPick()
     end
     
     -- 等待3秒后自动重启草药系统（如果之前是开启的）
@@ -3958,6 +4037,13 @@ task.spawn(function()
                 end
             end
             
+            -- 清理过期的修改记录
+            for herb, _ in pairs(HerbState.modifiedHerbs) do
+                if not herb or not herb.Parent then
+                    HerbState.modifiedHerbs[herb] = nil
+                end
+            end
+            
             -- 如果当前目标为空或无效，强制重新寻找
             if HerbState.currentHerb and (not HerbState.currentHerb.Parent or not HerbState.currentHerb:IsDescendantOf(Workspace)) then
                 print("[定期清理] 当前目标无效，强制重新寻找")
@@ -3969,91 +4055,4 @@ task.spawn(function()
     end
 end)
 
--- ===================== 错误处理和安全机制 =====================
--- 全局错误捕获，防止脚本崩溃
-local function safeExecute(func, errorMessage)
-    local success, err = pcall(func)
-    if not success then
-        print("[错误] " .. errorMessage .. ": " .. tostring(err))
-        return false
-    end
-    return true
-end
-
--- 增强版的主循环包装
-local function safeMainLoop()
-    while HerbState.isRunning do
-        local success, err = pcall(function()
-            mainLoop()
-        end)
-        
-        if not success then
-            print("[主循环错误] " .. tostring(err))
-            print("[主循环] 5秒后重启主循环...")
-            
-            -- 清理错误状态
-            disableFlight()
-            HerbState.currentHerb = nil
-            AuraState.currentAura = nil
-            
-            -- 等待5秒后重启
-            for i = 1, 50 do
-                if not HerbState.isRunning then break end
-                task.wait(0.1)
-            end
-            
-            if HerbState.isRunning then
-                print("[主循环] 重启主循环...")
-            end
-        else
-            -- 正常退出
-            break
-        end
-    end
-end
-
--- 替换原始的startHerbSystem中的mainLoop调用
-local originalStartHerbSystem = startHerbSystem
-startHerbSystem = function()
-    if HerbState.isRunning then
-        print("[系统] 系统已经在运行中")
-        return false
-    end
-    
-    print("[系统] 正在启动系统...")
-    
-    HerbState.retryAttempts = 0
-    HerbState.currentTimeoutCount = 0
-    HerbState.collectedHerbs = {}
-    HerbState.timeoutHerbs = {}
-    HerbState.herbAgeCache = {}
-    HerbState.failCount = 0
-    HerbState.currentHerb = nil
-    AuraState.currentAura = nil
-    HerbState.IsFlying = false
-    
-    if HerbState.FlightBodyVelocity then
-        HerbState.FlightBodyVelocity:Destroy()
-        HerbState.FlightBodyVelocity = nil
-    end
-    if HerbState.FlightBodyGyro then
-        HerbState.FlightBodyGyro:Destroy()
-        HerbState.FlightBodyGyro = nil
-    end
-    if HerbState.FlightConnection then
-        HerbState.FlightConnection:Disconnect()
-        HerbState.FlightConnection = nil
-    end
-    
-    HerbState.isRunning = true
-    
-    -- 使用安全的执行方式
-    task.spawn(safeMainLoop)
-    
-    print("[系统] 系统已成功启动")
-    return true
-end
-
 print("=== 系统初始化完成 ===")
-
-
