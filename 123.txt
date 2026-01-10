@@ -288,12 +288,17 @@ local function enableAllCollisionInMap()
     return true
 end
 
--- ===================== 防AFK功能 =====================
+-- ===================== 防AFK功能 - 手机端兼容版本 =====================
 -- 保存原来的远程事件引用
 local InteractRemoteEvent = nil
 
 local function setupAntiAFK()
     print("[防AFK] 启动防AFK系统")
+    
+    -- 判断是否为移动设备
+    local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+    
+    print(string.format("[防AFK] 设备类型: %s", isMobile and "移动设备" or "电脑设备"))
     
     -- 查找远程事件
     if not InteractRemoteEvent then
@@ -304,9 +309,11 @@ local function setupAntiAFK()
                 print("[防AFK] 找到远程事件: Interact")
             else
                 print("[防AFK] 警告: 未找到Interact远程事件")
+                InteractRemoteEvent = nil
             end
         else
             print("[防AFK] 警告: 未找到Remotes文件夹")
+            InteractRemoteEvent = nil
         end
     end
     
@@ -321,62 +328,99 @@ local function setupAntiAFK()
     AntiAFKState.lastInputTime = tick()
     AntiAFKState.lastAFKSignalTime = tick()
     
+    -- 移动设备上禁用虚拟用户输入
+    if isMobile then
+        AntiAFKState.useSimulatedInput = false
+        print("[防AFK] 移动设备上禁用模拟输入")
+    end
+    
     -- 使用连接器来持续运行防AFK
     AntiAFKState.connection = RunService.Heartbeat:Connect(function()
         local currentTime = tick()
+        local logInterval = 60  -- 日志输出间隔(秒)，避免频繁打印
         
-        -- 方法1: 使用VirtualUser模拟鼠标点击（每55秒一次）
-        if AntiAFKState.useSimulatedInput and currentTime - AntiAFKState.lastInputTime >= AntiAFKState.antiAFKInterval then
-            local success, errorMsg = pcall(function()
-                if VirtualUser then
-                    -- 模拟鼠标点击
-                    VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
-                    task.wait(0.1)
-                    VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
-                    
-                    AntiAFKState.lastInputTime = currentTime
-                    print("[防AFK] 模拟鼠标点击已执行 - " .. os.date("%H:%M:%S"))
-                    
-                    -- 重置错误计数
-                    AntiAFKState.errorCount = 0
-                else
-                    warn("[防AFK] VirtualUser 服务不可用")
+        -- 方法1: 使用VirtualUser模拟鼠标点击（每55秒一次）- 仅非移动设备
+        if AntiAFKState.useSimulatedInput and not isMobile then
+            if currentTime - AntiAFKState.lastInputTime >= AntiAFKState.antiAFKInterval then
+                local success, errorMsg = pcall(function()
+                    if VirtualUser and typeof(VirtualUser) == "table" then
+                        -- 模拟鼠标点击
+                        VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+                        task.wait(0.1)
+                        VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+                        
+                        AntiAFKState.lastInputTime = currentTime
+                        
+                        -- 限制日志输出频率
+                        if currentTime - AntiAFKState.lastLogTime >= logInterval then
+                            print("[防AFK] 模拟鼠标点击已执行 - " .. os.date("%H:%M:%S"))
+                            AntiAFKState.lastLogTime = currentTime
+                        end
+                        
+                        -- 重置错误计数
+                        AntiAFKState.errorCount = 0
+                    else
+                        warn("[防AFK] VirtualUser 服务不可用")
+                        AntiAFKState.useSimulatedInput = false
+                        print("[防AFK] 已禁用模拟输入")
+                    end
+                end)
+                
+                if not success then
+                    AntiAFKState.errorCount = AntiAFKState.errorCount + 1
+                    if AntiAFKState.errorCount <= 3 then  -- 前3次错误才打印
+                        print("[防AFK] 模拟鼠标点击失败: " .. tostring(errorMsg))
+                    end
                 end
-            end)
-            
-            if not success then
-                AntiAFKState.errorCount = AntiAFKState.errorCount + 1
-                print("[防AFK] 模拟鼠标点击失败: " .. tostring(errorMsg))
             end
         end
         
         -- 方法2: 直接发送远程事件（每30秒一次）
-        if AntiAFKState.useRemoteEvent and currentTime - AntiAFKState.lastAFKSignalTime >= AntiAFKState.afkSignalInterval then
-            local success, errorMsg = pcall(function()
-                if InteractRemoteEvent then
-                    -- 发送"Active"信号给服务器
-                    InteractRemoteEvent:FireServer("Active")
-                    
-                    AntiAFKState.lastAFKSignalTime = currentTime
-                    print("[防AFK] 发送活动信号到服务器 - " .. os.date("%H:%M:%S"))
-                    
-                    -- 重置错误计数
-                    AntiAFKState.errorCount = 0
-                else
-                    -- 如果找不到远程事件，尝试重新查找
-                    local RemotesFolder = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
-                    if RemotesFolder then
-                        InteractRemoteEvent = RemotesFolder:FindFirstChild("Interact")
-                        if InteractRemoteEvent then
-                            print("[防AFK] 重新找到远程事件: Interact")
+        if AntiAFKState.useRemoteEvent then
+            if currentTime - AntiAFKState.lastAFKSignalTime >= AntiAFKState.afkSignalInterval then
+                local success, errorMsg = pcall(function()
+                    if InteractRemoteEvent then
+                        -- 发送"Active"信号给服务器
+                        InteractRemoteEvent:FireServer("Active")
+                        
+                        AntiAFKState.lastAFKSignalTime = currentTime
+                        
+                        -- 限制日志输出频率
+                        if currentTime - AntiAFKState.lastLogTime >= logInterval then
+                            print("[防AFK] 发送活动信号到服务器 - " .. os.date("%H:%M:%S"))
+                            AntiAFKState.lastLogTime = currentTime
+                        end
+                        
+                        -- 重置错误计数
+                        AntiAFKState.errorCount = 0
+                    else
+                        -- 如果找不到远程事件，尝试重新查找
+                        local RemotesFolder = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
+                        if RemotesFolder then
+                            InteractRemoteEvent = RemotesFolder:FindFirstChild("Interact")
+                            if InteractRemoteEvent then
+                                print("[防AFK] 重新找到远程事件: Interact")
+                            else
+                                -- 移动设备上如果找不到远程事件，降低信号发送频率
+                                if isMobile then
+                                    AntiAFKState.afkSignalInterval = 60  -- 改为60秒一次
+                                end
+                            end
                         end
                     end
+                end)
+                
+                if not success then
+                    AntiAFKState.errorCount = AntiAFKState.errorCount + 1
+                    if AntiAFKState.errorCount <= 3 then  -- 前3次错误才打印
+                        print("[防AFK] 发送活动信号失败: " .. tostring(errorMsg))
+                    end
+                    
+                    -- 移动设备上增加容错机制
+                    if isMobile and AntiAFKState.errorCount > 5 then
+                        AntiAFKState.afkSignalInterval = 120  -- 错误过多时降低频率
+                    end
                 end
-            end)
-            
-            if not success then
-                AntiAFKState.errorCount = AntiAFKState.errorCount + 1
-                print("[防AFK] 发送活动信号失败: " .. tostring(errorMsg))
             end
         end
         
@@ -390,19 +434,29 @@ local function setupAntiAFK()
                 AntiAFKState.connection = nil
             end
             
-            -- 等待1秒后重新启动
-            task.wait(1)
+            -- 等待2秒后重新启动
+            task.wait(2)
             
             -- 重新启动防AFK
             setupAntiAFK()
         end
     end)
     
-    print("[防AFK] 防AFK系统已启动")
-    print("[防AFK] 策略1: 模拟鼠标点击 (间隔: " .. AntiAFKState.antiAFKInterval .. "秒)")
-    print("[防AFK] 策略2: 发送活动信号 (间隔: " .. AntiAFKState.afkSignalInterval .. "秒)")
+    -- 初始化日志时间
+    AntiAFKState.lastLogTime = tick()
     
-    -- 返回一个可以停止的函数（但正常情况下不会调用）
+    print("[防AFK] 防AFK系统已启动")
+    print("[防AFK] 设备类型: " .. (isMobile and "移动设备" or "电脑设备"))
+    
+    if AntiAFKState.useSimulatedInput and not isMobile then
+        print("[防AFK] 策略1: 模拟鼠标点击 (间隔: " .. AntiAFKState.antiAFKInterval .. "秒)")
+    end
+    
+    if AntiAFKState.useRemoteEvent then
+        print("[防AFK] 策略2: 发送活动信号 (间隔: " .. AntiAFKState.afkSignalInterval .. "秒)")
+    end
+    
+    -- 返回一个可以停止的函数
     local function stopAntiAFK()
         print("[防AFK] 停止防AFK系统")
         AntiAFKState.isRunning = false
@@ -418,7 +472,7 @@ local function setupAntiAFK()
     -- 添加一个自动重启机制，以防连接意外断开
     local function checkAndRestartAntiAFK()
         while AntiAFKState.isRunning do
-            task.wait(30) -- 每30秒检查一次
+            task.wait(60) -- 每60秒检查一次
             
             if AntiAFKState.isRunning and not AntiAFKState.connection then
                 print("[防AFK] 检测到防AFK连接断开，正在重新启动...")
@@ -433,10 +487,11 @@ local function setupAntiAFK()
     return stopAntiAFK
 end
 
--- ===================== 连接到游戏的输入事件，更新最后活动时间 =====================
+-- ===================== 连接到游戏的输入事件，更新最后活动时间 - 手机端优化 =====================
 local function setupGameInputMonitoring()
     print("[防AFK] 设置游戏输入监控")
     
+    local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
     local lastGameInteractionTime = tick()
     
     -- 监控游戏的所有输入事件
@@ -445,15 +500,32 @@ local function setupGameInputMonitoring()
         AntiAFKState.lastInputTime = tick() -- 同时更新防AFK的输入时间
     end
     
-    -- 连接到输入变化事件
-    game:GetService("UserInputService").InputChanged:Connect(function()
-        updateInteractionTime()
-    end)
-    
-    -- 连接到输入开始事件
-    game:GetService("UserInputService").InputBegan:Connect(function()
-        updateInteractionTime()
-    end)
+    if isMobile then
+        -- 移动设备：监听触摸事件
+        game:GetService("UserInputService").TouchStarted:Connect(function()
+            updateInteractionTime()
+        end)
+        
+        game:GetService("UserInputService").TouchMoved:Connect(function()
+            updateInteractionTime()
+        end)
+        
+        -- 移动设备也监听按钮点击
+        game:GetService("UserInputService").InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.Touch then
+                updateInteractionTime()
+            end
+        end)
+    else
+        -- 电脑设备：监听键盘和鼠标事件
+        game:GetService("UserInputService").InputChanged:Connect(function()
+            updateInteractionTime()
+        end)
+        
+        game:GetService("UserInputService").InputBegan:Connect(function()
+            updateInteractionTime()
+        end)
+    end
     
     -- 检查是否需要发送活动信号
     local checkConnection = RunService.Heartbeat:Connect(function()
@@ -468,16 +540,25 @@ local function setupGameInputMonitoring()
                     if InteractRemoteEvent then
                         InteractRemoteEvent:FireServer("Active")
                         AntiAFKState.lastAFKSignalTime = currentTime
-                        print("[输入监控] 超过50秒无活动，发送活动信号 - " .. os.date("%H:%M:%S"))
+                        
+                        -- 限制日志输出频率
+                        if currentTime - (AntiAFKState.lastGameLogTime or 0) >= 60 then
+                            print("[输入监控] 超过50秒无活动，发送活动信号 - " .. os.date("%H:%M:%S"))
+                            AntiAFKState.lastGameLogTime = currentTime
+                        end
                     end
                 end)
                 
-                if not success then
+                if not success and (AntiAFKState.gameErrorCount or 0) < 3 then
+                    AntiAFKState.gameErrorCount = (AntiAFKState.gameErrorCount or 0) + 1
                     print("[输入监控] 发送活动信号失败: " .. tostring(errorMsg))
                 end
             end
         end
     end)
+    
+    AntiAFKState.lastGameLogTime = tick()
+    AntiAFKState.gameErrorCount = 0
     
     print("[防AFK] 游戏输入监控已启动")
     return checkConnection
@@ -4970,4 +5051,3 @@ task.spawn(function()
 end)
 
 print("=== 系统初始化完成 ===")
-
