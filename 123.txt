@@ -27,7 +27,7 @@ local CONFIG = {
     FLY_SPEED = 120,
     MOVE_TIMEOUT = 35,
     MOVE_DISTANCE_THRESHOLD = 4,
-    HEIGHT_TWEEN_TIME = 0.5,
+    HEIGHT_TWEEN_TIME = 0.7,
     HERBS_FOLDER_NAME = "Herbs",
     COLLECT_TIMEOUT = 15,
     MAX_RETRY_ATTEMPTS = 3,
@@ -2604,17 +2604,21 @@ local function stopHerbSystem()
     return true
 end
 
--- ===================== 从ReplicatedStorage.Herbs加载草药类型 =====================
+-- ===================== 从ReplicatedStorage.Models.Herbs加载草药类型 =====================
 local function loadHerbTypesFromReplicatedStorage()
     local herbsList = {}
     local seenNames = {}
     
-    print("[草药列表] 从ReplicatedStorage.Herbs文件夹加载...")
+    print("[草药列表] 从ReplicatedStorage.Models.Herbs文件夹加载...")
     
-    -- 从ReplicatedStorage.Herbs文件夹加载
-    local herbsFolder = ReplicatedStorage:FindFirstChild("Herbs")
+    -- 从ReplicatedStorage.Models.Herbs文件夹加载
+    local herbsFolder = ReplicatedStorage:FindFirstChild("Models")
     if herbsFolder then
-        print("[草药列表] 找到ReplicatedStorage.Herbs文件夹")
+        herbsFolder = herbsFolder:FindFirstChild("Herbs")
+    end
+    
+    if herbsFolder then
+        print("[草药列表] 找到ReplicatedStorage.Models.Herbs文件夹")
         
         -- 遍历所有草药对象
         for _, item in ipairs(herbsFolder:GetChildren()) do
@@ -2651,7 +2655,7 @@ local function loadHerbTypesFromReplicatedStorage()
             end
         end
     else
-        print("[草药列表] 未找到ReplicatedStorage.Herbs文件夹，使用默认列表")
+        print("[草药列表] 未找到ReplicatedStorage.Models.Herbs文件夹，使用默认列表")
         herbsList = {
             "Extreme Yin Growth",
             "Extreme Yang Growth", 
