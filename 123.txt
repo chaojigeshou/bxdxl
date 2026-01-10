@@ -33,7 +33,7 @@ local CONFIG = {
     MAX_RETRY_ATTEMPTS = 3,
     FLIGHT_STABILIZATION = 0.95,
     TIMEOUT_COOLDOWN = 30,
-    MAX_PRIORITY_HERBS = 5,
+    MAX_PRIORITY_HERBS = 6,
     UI_UPDATE_INTERVAL = 1,
     
     -- 修炼配置
@@ -4970,3 +4970,4 @@ task.spawn(function()
 end)
 
 print("=== 系统初始化完成 ===")
+
