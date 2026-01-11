@@ -102,11 +102,16 @@ local HerbState = {
     targetMode = "both",   -- 目标模式: both, herb, aura
     quickPickEnabled = false,  -- 一键加速开关
     autoHarvestEnabled = false,  -- 自动采摘开关
-    autoHarvestConnection = nil,  -- 自动采摘连接
+    autoHarvestConnection = nil,  -- 自动采摘连接器
+    autoHarvestLastCollectTime = 0,  -- 上次采摘时间
+    autoHarvestCollectInterval = 0.1,  -- 采集间隔（秒）
+    autoHarvestMaxDistance = 15,  -- 最大收集距离
     modifiedHerbs = {},  -- 已修改采摘时间的草药记录
     herbsFolderListener = nil,  -- 草药文件夹监听器
     quickPickConnection = nil,  -- 一键加速连接器
-    lastTargetTime = 0  -- 上次找到目标的时间
+    lastTargetTime = 0,  -- 上次找到目标的时间
+    collisionEnabled = false,  -- 碰撞禁用开关
+    auraAutoCollectEnabled = false  -- 功法自动收集开关
 }
 
 local AuraAutoCollectState = {
@@ -117,7 +122,7 @@ local AuraAutoCollectState = {
     maxDistance = 15,  -- 最大收集距离 - 从10改为15
 }
 
--- 碰撞禁用状态 - 修复：使用表存储碰撞状态和已处理的对象
+-- 碰撞禁用状态
 local CollisionState = {
     isCollisionDisabled = false,
     processedParts = {},  -- 存储已处理的部分
@@ -182,7 +187,6 @@ local function disableAllCollisionInMap()
                 -- 监听碰撞属性的变化
                 local connection = item:GetPropertyChangedSignal("CanCollide"):Connect(function()
                     if item.CanCollide == true then
-                        -- print(string.format("[碰撞修改] 检测到碰撞恢复: %s，重新禁用", item.Name))
                         item.CanCollide = false
                     end
                 end)
@@ -214,12 +218,10 @@ local function disableAllCollisionInMap()
                 -- 保存原始碰撞状态
                 CollisionState.originalCollisionStates[descendant] = descendant.CanCollide
                 descendant.CanCollide = false
-                -- print(string.format("[碰撞修改] 新对象已禁用碰撞: %s", descendant.Name))
                 
                 -- 监听新对象的碰撞变化
                 local connection = descendant:GetPropertyChangedSignal("CanCollide"):Connect(function()
                     if descendant.CanCollide == true then
-                        -- print(string.format("[碰撞修改] 检测到新对象碰撞恢复: %s，重新禁用", descendant.Name))
                         descendant.CanCollide = false
                     end
                 end)
@@ -557,45 +559,6 @@ local function stopAntiAFK()
     end
 end
 
--- ===================== 修复：防AFK系统健康检查 =====================
-local function checkAntiAFKHealth()
-    -- 只在防AFK系统应该运行时检查
-    if not AntiAFKState.IsRunning then
-        return false
-    end
-    
-    local currentTime = tick()
-    local timeSinceSignal = currentTime - AntiAFKState.LastSignalTime
-    
-    -- 如果超过2分钟没有活动信号，认为系统可能有问题
-    if timeSinceSignal > 120 then
-        print("[防AFK健康检查] 长时间无活动信号 (" .. math.floor(timeSinceSignal) .. "秒)，系统可能已停止")
-        
-        -- 检查连接状态
-        local activeConnections = 0
-        for _, conn in pairs(AntiAFKState.Connections) do
-            if conn and conn.Connected then
-                activeConnections = activeConnections + 1
-            end
-        end
-        
-        print("[防AFK健康检查] 活跃连接数: " .. activeConnections .. "/" .. #AntiAFKState.Connections)
-        
-        -- 如果连接数不足，尝试重启
-        if activeConnections < 2 then
-            print("[防AFK健康检查] 连接不足，尝试重启防AFK系统")
-            pcall(function()
-                stopAntiAFK()
-                task.wait(1)
-                setupAntiAFK()
-            end)
-            return false
-        end
-    end
-    
-    return true
-end
-
 -- ===================== 修炼功能 =====================
 local function toggleCultivation()
     local xiulian = player:GetAttribute("Gathering")
@@ -790,6 +753,7 @@ local function modifySingleHerbPickTime(herb)
     end
     
     local success = false
+    local modifiedCount = 0
     
     -- 递归查找ProximityPrompt
     local function findAndChangePrompts(obj)
@@ -797,6 +761,8 @@ local function modifySingleHerbPickTime(herb)
             if child:IsA("ProximityPrompt") then
                 -- 把按住时间改成0，这样点一下就采到了
                 child.HoldDuration = 0
+                modifiedCount = modifiedCount + 1
+                success = true
                 
                 -- 有些草药可能还有Data子项，也一起改了
                 if child:FindFirstChild("Data") then
@@ -804,10 +770,9 @@ local function modifySingleHerbPickTime(herb)
                     local holdTime = data:FindFirstChild("HoldDuration")
                     if holdTime then
                         holdTime.Value = 0
+                        modifiedCount = modifiedCount + 1
                     end
                 end
-                
-                success = true
             else
                 -- 继续往子对象里找
                 findAndChangePrompts(child)
@@ -840,53 +805,28 @@ local function setupQuickPickListener()
     local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
     if herbsFolder then
         -- 立即修改所有现有草药
-        print("[一键加速] 开始修改所有现有草药...")
+        local count = 0
         for _, herb in ipairs(herbsFolder:GetChildren()) do
             if herb and herb.Parent then
-                modifySingleHerbPickTime(herb)
-                print("[一键加速] 修改草药: " .. herb.Name)
+                if modifySingleHerbPickTime(herb) then
+                    count = count + 1
+                end
             end
         end
-        print("[一键加速] 所有现有草药已修改完成")
+        print(string.format("[一键加速] 已修改 %d 个现有草药", count))
         
         -- 监听新生成的草药
         HerbState.quickPickConnection = herbsFolder.ChildAdded:Connect(function(child)
             if child and child.Parent then
-                task.wait(0.5) -- 等待0.5秒让草药完全生成
-                modifySingleHerbPickTime(child)
-                print("[一键加速] 新草药已修改: " .. child.Name)
+                task.wait(0.3) -- 等待草药完全生成
+                if modifySingleHerbPickTime(child) then
+                    print("[一键加速] 新草药已修改: " .. child.Name)
+                end
             end
         end)
     else
         print("[一键加速] 警告: 未找到草药文件夹")
     end
-end
-
-local function toggleQuickPick()
-    HerbState.quickPickEnabled = not HerbState.quickPickEnabled
-    
-    if HerbState.quickPickEnabled then
-        print("[一键加速] 开启一键加速")
-        -- 设置监听器
-        setupQuickPickListener()
-        -- 再次确保修改所有现有草药
-        local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
-        if herbsFolder then
-            for _, herb in ipairs(herbsFolder:GetChildren()) do
-                modifySingleHerbPickTime(herb)
-            end
-        end
-    else
-        print("[一键加速] 关闭一键加速")
-        -- 清除修改记录和监听器
-        HerbState.modifiedHerbs = {}
-        if HerbState.quickPickConnection then
-            HerbState.quickPickConnection:Disconnect()
-            HerbState.quickPickConnection = nil
-        end
-    end
-    
-    return HerbState.quickPickEnabled
 end
 
 -- ===================== 修复功法自动收集：使用 fireproximityprompt =====================
@@ -987,8 +927,11 @@ local function autoCollectNearestAura()
     end
 end
 
--- ===================== 修复自动采摘功能：同样使用 fireproximityprompt =====================
+-- ===================== 修复的自动采摘功能 =====================
+-- ===================== 自动采摘核心函数 =====================
 local function autoHarvestNearestHerb()
+    if not HerbState.autoHarvestEnabled then return end
+    
     local character = player.Character
     if not character then return end
     
@@ -996,20 +939,31 @@ local function autoHarvestNearestHerb()
     if not humanoidRootPart then return end
     
     local herbsFolder = Workspace:FindFirstChild("Herbs")
-    if not herbsFolder then return end
+    if not herbsFolder then 
+        -- 如果找不到草药文件夹，尝试其他可能的名字
+        for _, name in ipairs({"Herb", "草药", "Herbs", "HerbCollection"}) do
+            herbsFolder = Workspace:FindFirstChild(name)
+            if herbsFolder then break end
+        end
+        if not herbsFolder then return end
+    end
     
     local playerPos = humanoidRootPart.Position
-    local nearestHerb = nil
+    local nearestPrompt = nil
     local nearestDistance = math.huge
+    local nearestHerbName = ""
     
-    -- 找最近的草药
+    -- 扫描所有草药
     for _, herb in ipairs(herbsFolder:GetChildren()) do
-        -- 递归找ProximityPrompt
+        if not herb or not herb.Parent then continue end
+        
+        -- 递归查找ProximityPrompt
         local function findProximityPrompt(obj)
             for _, child in ipairs(obj:GetChildren()) do
                 if child:IsA("ProximityPrompt") then
-                    -- 修复：安全地获取草药位置
-                    local herbPos
+                    -- 安全地获取草药位置
+                    local herbPos = nil
+                    
                     if obj:IsA("BasePart") then
                         herbPos = obj.Position
                     elseif obj:IsA("Model") then
@@ -1029,10 +983,11 @@ local function autoHarvestNearestHerb()
                     
                     if herbPos then
                         local distance = (herbPos - playerPos).Magnitude
-                        -- 如果在15个单位距离内
-                        if distance < 15 and distance < nearestDistance then
+                        -- 如果在最大距离内且更近
+                        if distance < HerbState.autoHarvestMaxDistance and distance < nearestDistance then
                             nearestDistance = distance
-                            nearestHerb = child
+                            nearestPrompt = child
+                            nearestHerbName = obj.Name
                         end
                     end
                     return
@@ -1046,18 +1001,58 @@ local function autoHarvestNearestHerb()
     end
     
     -- 如果找到最近的草药，就触发采摘
-    if nearestHerb then
-        -- 使用 fireproximityprompt 函数替代 Trigger 方法
+    if nearestPrompt then
+        -- 使用 fireproximityprompt 函数
         local success, err = pcall(function()
-            fireproximityprompt(nearestHerb, player)
+            fireproximityprompt(nearestPrompt, player)
         end)
         
         if success then
-            print(string.format("[自动采摘] 触发草药: %s (距离: %.1f米)", 
-                nearestHerb.Parent.Name, nearestDistance))
+            local currentTime = tick()
+            
+            -- 限制日志输出频率（每3秒记录一次）
+            if currentTime - HerbState.autoHarvestLastCollectTime > 3 then
+                print(string.format("[自动采摘] 触发草药: %s (距离: %.1f米)", nearestHerbName, nearestDistance))
+                HerbState.autoHarvestLastCollectTime = currentTime
+            end
+            
+            -- 短暂延迟避免过度触发
+            task.wait(0.2)
         else
-            print("[自动采摘] 触发草药失败: " .. tostring(err))
+            if tick() - HerbState.autoHarvestLastCollectTime > 5 then
+                print("[自动采摘] 触发草药失败: " .. tostring(err))
+            end
         end
+    end
+end
+
+-- ===================== 修复启动自动采摘 =====================
+local function startAutoHarvest()
+    -- 如果已经启用，先停止
+    if HerbState.autoHarvestConnection then
+        stopAutoHarvest()
+    end
+    
+    HerbState.autoHarvestEnabled = true
+    print(string.format("[自动采摘] 开启自动采摘 (%.1f秒间隔, 距离: %d米)", 
+        HerbState.autoHarvestCollectInterval, HerbState.autoHarvestMaxDistance))
+    
+    -- 创建一个新的连接器
+    HerbState.autoHarvestConnection = RunService.Heartbeat:Connect(function()
+        if HerbState.autoHarvestEnabled then
+            autoHarvestNearestHerb()
+            task.wait(HerbState.autoHarvestCollectInterval)
+        end
+    end)
+end
+
+local function stopAutoHarvest()
+    HerbState.autoHarvestEnabled = false
+    print("[自动采摘] 关闭自动采摘")
+    
+    if HerbState.autoHarvestConnection then
+        HerbState.autoHarvestConnection:Disconnect()
+        HerbState.autoHarvestConnection = nil
     end
 end
 
@@ -1088,28 +1083,6 @@ local function toggleAuraAutoCollect()
     end
     
     return AuraAutoCollectState.enabled
-end
-
--- ===================== 开关自动采摘 =====================
-local function toggleAutoHarvest()
-    HerbState.autoHarvestEnabled = not HerbState.autoHarvestEnabled
-    
-    if HerbState.autoHarvestEnabled then
-        print("[自动采摘] 开启自动采摘 (0.1秒间隔)")
-        -- 每0.1秒检查一次附近的草药
-        HerbState.autoHarvestConnection = RunService.Heartbeat:Connect(function()
-            autoHarvestNearestHerb()
-            task.wait(0.1)
-        end)
-    else
-        print("[自动采摘] 关闭自动采摘")
-        if HerbState.autoHarvestConnection then
-            HerbState.autoHarvestConnection:Disconnect()
-            HerbState.autoHarvestConnection = nil
-        end
-    end
-    
-    return HerbState.autoHarvestEnabled
 end
 
 -- ===================== 移动设备适配 =====================
@@ -1588,35 +1561,6 @@ local function scanHerbs()
     local validHerbs = {}
     local currentTime = tick()
     
-    -- 定期清理过期的记录（每5分钟清理一次）
-    if currentTime % 300 < 0.5 then  -- 每5分钟清理一次
-        print("[扫描] 执行定期状态清理...")
-        
-        -- 清理已采集记录
-        local newCollectedHerbs = {}
-        for herb, collectedTime in pairs(HerbState.collectedHerbs) do
-            if herb and herb.Parent and (currentTime - collectedTime) < 600 then  -- 只保留10分钟内的记录
-                newCollectedHerbs[herb] = collectedTime
-            end
-        end
-        HerbState.collectedHerbs = newCollectedHerbs
-        
-        -- 清理超时记录
-        local newTimeoutHerbs = {}
-        for herb, timeoutTime in pairs(HerbState.timeoutHerbs) do
-            if herb and herb.Parent and (currentTime - timeoutTime) < CONFIG.TIMEOUT_COOLDOWN then
-                newTimeoutHerbs[herb] = timeoutTime
-            end
-        end
-        HerbState.timeoutHerbs = newTimeoutHerbs
-        
-        -- 清理年龄缓存
-        HerbState.herbAgeCache = {}
-        
-        print(string.format("[扫描] 清理完成: 已采集 %d, 超时 %d", 
-            table.count(newCollectedHerbs), table.count(newTimeoutHerbs)))
-    end
-    
     -- 扫描所有草药对象
     local scanCount = 0
     local skipCount = 0
@@ -2090,13 +2034,6 @@ local function flyToTarget(target, isAura)
         local verticalDistance = math.abs(flyHeight - currentPos.Y)
         local totalDistance = (targetFlyPos - currentPos).Magnitude
         
-        -- 每10次检查打印一次距离信息
-        --checkCount = checkCount + 1
-        --if checkCount % 10 == 0 then
-        --    print(string.format("[飞行] 水平距离: %.2f米，垂直距离: %.2f米，总距离: %.2f米", 
-        --        actualHorizontalDistance, verticalDistance, totalDistance))
-        --end
-
         -- 关键修复：到达判断 - 当水平距离小于阈值时，就认为到达
         if actualHorizontalDistance <= CONFIG.MOVE_DISTANCE_THRESHOLD then
             if HerbState.FlightBodyVelocity then
@@ -2157,10 +2094,6 @@ local function flyToTarget(target, isAura)
         -- 确保BodyVelocity存在并设置速度
         if HerbState.FlightBodyVelocity then
             HerbState.FlightBodyVelocity.Velocity = velocity
-            --if checkCount % 30 == 0 then
-            --     print(string.format("[飞行] 设置速度向量: (%.1f, %.1f, %.1f)，速度大小: %.1f", 
-            --        velocity.X, velocity.Y, velocity.Z, velocity.Magnitude))
-            --end
         else
             warn("[飞行] FlightBodyVelocity不存在")
             return false
@@ -2602,89 +2535,9 @@ local function resetScanState()
     print("[重置] 扫描状态已重置")
 end
 
--- ===================== 修复：增强的定期状态清理 =====================
-local function enhancedCleanup()
-    print("[清理] 执行增强的状态清理...")
-    local currentTime = tick()
-    
-    -- 1. 清理已采集记录（超过15分钟的记录）
-    local cleanedCollected = 0
-    local newCollectedHerbs = {}
-    for herb, collectedTime in pairs(HerbState.collectedHerbs) do
-        if herb and herb.Parent and (currentTime - collectedTime) < 900 then  -- 15分钟
-            newCollectedHerbs[herb] = collectedTime
-        else
-            cleanedCollected = cleanedCollected + 1
-        end
-    end
-    HerbState.collectedHerbs = newCollectedHerbs
-    
-    -- 2. 清理超时记录
-    local cleanedTimeout = 0
-    local newTimeoutHerbs = {}
-    for herb, timeoutTime in pairs(HerbState.timeoutHerbs) do
-        if herb and herb.Parent and (currentTime - timeoutTime) < CONFIG.TIMEOUT_COOLDOWN then
-            newTimeoutHerbs[herb] = timeoutTime
-        else
-            cleanedTimeout = cleanedTimeout + 1
-        end
-    end
-    HerbState.timeoutHerbs = newTimeoutHerbs
-    
-    -- 3. 清理年龄缓存
-    HerbState.herbAgeCache = {}
-    
-    -- 4. 清理修改记录
-    local cleanedModified = 0
-    local newModifiedHerbs = {}
-    for herb, modifiedTime in pairs(HerbState.modifiedHerbs) do
-        if herb and herb.Parent then
-            newModifiedHerbs[herb] = modifiedTime
-        else
-            cleanedModified = cleanedModified + 1
-        end
-    end
-    HerbState.modifiedHerbs = newModifiedHerbs
-    
-    -- 5. 重置当前目标如果无效
-    if HerbState.currentHerb and (not HerbState.currentHerb.Parent or not HerbState.currentHerb:IsDescendantOf(Workspace)) then
-        HerbState.currentHerb = nil
-        print("[清理] 清理无效的当前目标")
-    end
-    
-    -- 6. 重置功法目标如果无效
-    if AuraState.currentAura and (not AuraState.currentAura.Parent or not AuraState.currentAura:IsDescendantOf(Workspace)) then
-        AuraState.currentAura = nil
-        print("[清理] 清理无效的功法目标")
-    end
-    
-    -- 计算表的大小（修复：替换错误的table.count调用）
-    local function getTableSize(t)
-        local count = 0
-        for _ in pairs(t) do
-            count = count + 1
-        end
-        return count
-    end
-    
-    print(string.format("[清理] 完成: 已采集 %d, 超时 %d, 修改 %d, 当前记录: 已采集 %d, 超时 %d, 修改 %d",
-        cleanedCollected, cleanedTimeout, cleanedModified,
-        getTableSize(newCollectedHerbs), getTableSize(newTimeoutHerbs), getTableSize(newModifiedHerbs)))
-    
-    return cleanedCollected + cleanedTimeout + cleanedModified
-end
-
 -- ===================== 修复：主循环中的改进 =====================
 local function mainLoop()
     print("[主流程] 启动，开始寻找目标...")
-    
-    -- 初始化清理计时器
-    local lastCleanupTime = tick()
-    local cleanupInterval = 300  -- 5分钟清理一次
-    
-    -- 初始化防AFK干扰计数器
-    local consecutiveFails = 0
-    local maxConsecutiveFails = 10
     
     if #HerbState.priorityHerbs > 0 then
         print("[主流程] 优先级草药设置:")
@@ -2706,18 +2559,12 @@ local function mainLoop()
             break
         end
         
-        -- 定期执行状态清理
-        local currentTime = tick()
-        if currentTime - lastCleanupTime > cleanupInterval then
-            enhancedCleanup()
-            lastCleanupTime = currentTime
-        end
-        
         HerbState.currentHerb = nil
         AuraState.currentAura = nil
         
         -- 清理已采集的草药记录（保留近期的）
         local tempCollected = {}
+        local currentTime = tick()
         local cleanupTime = currentTime - 600  -- 保留10分钟内的记录
         for herb, collectedTime in pairs(HerbState.collectedHerbs) do
             if collectedTime > cleanupTime then
@@ -2735,13 +2582,6 @@ local function mainLoop()
             print("[主流程] 寻找目标时发生错误，2秒后重试")
             warn("[主流程] 错误详情: " .. tostring(bestTarget))
             
-            consecutiveFails = consecutiveFails + 1
-            if consecutiveFails >= maxConsecutiveFails then
-                print("[主流程] 连续失败次数过多，执行强制清理")
-                enhancedCleanup()
-                consecutiveFails = 0
-            end
-            
             disableFlight()
             task.wait(2)
             continue
@@ -2751,21 +2591,9 @@ local function mainLoop()
             print("[主流程] 未找到任何目标，2秒后重试")
             disableFlight()
             
-            consecutiveFails = consecutiveFails + 1
-            if consecutiveFails >= maxConsecutiveFails then
-                print("[主流程] 连续失败次数过多，执行深度扫描")
-                -- 执行深度清理和重新扫描
-                enhancedCleanup()
-                resetScanState()
-                consecutiveFails = 0
-            end
-            
             task.wait(2)
             continue
         end
-        
-        -- 重置连续失败计数器
-        consecutiveFails = 0
         
         if not HerbState.isRunning then
             break
@@ -2964,6 +2792,7 @@ local function mainLoop()
     print("[主流程] 已停止")
 end
 
+-- ===================== 修复启动系统时的功能整合 =====================
 local function startHerbSystem()
     if HerbState.isRunning then
         print("[系统] 系统已经在运行中")
@@ -2972,6 +2801,7 @@ local function startHerbSystem()
     
     print("[系统] 正在启动系统...")
     
+    -- 重置状态
     HerbState.retryAttempts = 0
     HerbState.currentTimeoutCount = 0
     HerbState.collectedHerbs = {}
@@ -2982,8 +2812,10 @@ local function startHerbSystem()
     HerbState.currentHerb = nil
     AuraState.currentAura = nil
     HerbState.IsFlying = false
-    HerbState.lastTargetTime = tick()  -- 添加记录
+    HerbState.lastTargetTime = tick()
+    HerbState.autoHarvestLastCollectTime = 0
     
+    -- 清理飞行组件
     if HerbState.FlightBodyVelocity then
         HerbState.FlightBodyVelocity:Destroy()
         HerbState.FlightBodyVelocity = nil
@@ -2999,15 +2831,37 @@ local function startHerbSystem()
     
     HerbState.isRunning = true
     
-    -- 修复：启动系统时不改变目标模式，保持当前设置
-    print("[系统] 启动系统，当前目标模式: " .. HerbState.targetMode)
+    -- 启动碰撞禁用（根据复选框状态）
+    if HerbState.collisionEnabled then
+        print("[系统] 启用碰撞禁用")
+        disableAllCollisionInMap()
+    end
     
-    -- 如果开启了一键加速，重新设置监听器
+    -- 启动一键加速（根据复选框状态）
     if HerbState.quickPickEnabled then
+        print("[系统] 启用一键加速")
         setupQuickPickListener()
     end
     
-    -- 使用task.spawn替代coroutine，更稳定
+    -- 启动自动采摘（根据复选框状态）
+    if HerbState.autoHarvestEnabled then
+        print("[系统] 启用自动采摘")
+        startAutoHarvest()
+    end
+    
+    -- 启动功法自动收集（根据复选框状态）
+    if HerbState.auraAutoCollectEnabled then
+        print("[系统] 启用功法自动收集")
+        toggleAuraAutoCollect()
+    end
+    
+    print("[系统] 启动系统，当前目标模式: " .. HerbState.targetMode)
+    print("[系统] 自动采摘: " .. (HerbState.autoHarvestEnabled and "开启" or "关闭"))
+    print("[系统] 一键加速: " .. (HerbState.quickPickEnabled and "开启" or "关闭"))
+    print("[系统] 碰撞禁用: " .. (HerbState.collisionEnabled and "开启" or "关闭"))
+    print("[系统] 功法自动收集: " .. (HerbState.auraAutoCollectEnabled and "开启" or "关闭"))
+    
+    -- 启动主循环
     task.spawn(function()
         mainLoop()
     end)
@@ -3016,6 +2870,7 @@ local function startHerbSystem()
     return true
 end
 
+-- ===================== 修复停止系统时的清理 =====================
 local function stopHerbSystem()
     if not HerbState.isRunning then
         print("[系统] 系统未在运行")
@@ -3030,6 +2885,29 @@ local function stopHerbSystem()
     StopAllMovement()
     HerbState.currentHerb = nil
     AuraState.currentAura = nil
+    
+    -- 停止自动采摘
+    stopAutoHarvest()
+    
+    -- 停止功法自动收集
+    if AuraAutoCollectState.enabled then
+        toggleAuraAutoCollect()
+    end
+    
+    -- 停止一键加速监听器
+    if HerbState.quickPickConnection then
+        HerbState.quickPickConnection:Disconnect()
+        HerbState.quickPickConnection = nil
+    end
+    
+    -- 停止碰撞禁用
+    if CollisionState.isCollisionDisabled then
+        print("[系统] 恢复地图碰撞")
+        enableAllCollisionInMap()
+    end
+    
+    -- 清理草药修改记录
+    HerbState.modifiedHerbs = {}
     
     print("[系统] 系统已停止")
     return true
@@ -4048,7 +3926,7 @@ local function createPillUI()
     return screenGui
 end
 
--- ===================== 创建主UI（已移除新功能标签，功能并入草药系统） =====================
+-- ===================== 创建主UI =====================
 local MainUI = nil
 local CurrentTab = "herb" -- 当前选中的标签
 local UIUpdateConnection = nil
@@ -4191,7 +4069,7 @@ local function createMainUI()
     pillContentFrame.BackgroundTransparency = 1
     pillContentFrame.Visible = false
     
-    -- ===================== 草药内容（已包含新功能） =====================
+    -- ===================== 草药内容 =====================
     local herbStatusLabel = Instance.new("TextLabel")
     herbStatusLabel.Name = "HerbStatusLabel"
     herbStatusLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
@@ -4225,10 +4103,143 @@ local function createMainUI()
     herbPriorityLabel.TextSize = UI.SMALL_TEXT_SIZE
     herbPriorityLabel.TextXAlignment = Enum.TextXAlignment.Left
     
+    -- 功能复选框区域
+    local herbFunctionLabel = Instance.new("TextLabel")
+    herbFunctionLabel.Name = "HerbFunctionLabel"
+    herbFunctionLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
+    herbFunctionLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 90)
+    herbFunctionLabel.BackgroundTransparency = 1
+    herbFunctionLabel.Text = "启动时启用功能:"
+    herbFunctionLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
+    herbFunctionLabel.Font = Enum.Font.SourceSansBold
+    herbFunctionLabel.TextSize = UI.SMALL_TEXT_SIZE
+    herbFunctionLabel.TextXAlignment = Enum.TextXAlignment.Left
+    
+    -- 碰撞禁用复选框
+    local collisionCheckbox = Instance.new("TextButton")
+    collisionCheckbox.Name = "CollisionCheckbox"
+    collisionCheckbox.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
+    collisionCheckbox.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 120)
+    collisionCheckbox.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+    collisionCheckbox.Text = ""
+    collisionCheckbox.BorderSizePixel = 0
+    
+    local collisionCheckmark = Instance.new("TextLabel")
+    collisionCheckmark.Name = "CollisionCheckmark"
+    collisionCheckmark.Size = UDim2.new(0, 20, 0, 20)
+    collisionCheckmark.Position = UDim2.new(0, 5, 0.5, -10)
+    collisionCheckmark.BackgroundTransparency = 1
+    collisionCheckmark.Text = HerbState.collisionEnabled and "✓" or ""
+    collisionCheckmark.TextColor3 = Color3.fromRGB(100, 255, 100)
+    collisionCheckmark.Font = Enum.Font.SourceSansBold
+    collisionCheckmark.TextSize = 16
+    
+    local collisionLabel = Instance.new("TextLabel")
+    collisionLabel.Name = "CollisionLabel"
+    collisionLabel.Size = UDim2.new(1, -30, 1, 0)
+    collisionLabel.Position = UDim2.new(0, 30, 0, 0)
+    collisionLabel.BackgroundTransparency = 1
+    collisionLabel.Text = "禁用地图碰撞"
+    collisionLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    collisionLabel.Font = Enum.Font.SourceSans
+    collisionLabel.TextSize = UI.SMALL_TEXT_SIZE
+    collisionLabel.TextXAlignment = Enum.TextXAlignment.Left
+    
+    -- 一键加速复选框
+    local quickPickCheckbox = Instance.new("TextButton")
+    quickPickCheckbox.Name = "QuickPickCheckbox"
+    quickPickCheckbox.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
+    quickPickCheckbox.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 150)
+    quickPickCheckbox.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+    quickPickCheckbox.Text = ""
+    quickPickCheckbox.BorderSizePixel = 0
+    
+    local quickPickCheckmark = Instance.new("TextLabel")
+    quickPickCheckmark.Name = "QuickPickCheckmark"
+    quickPickCheckmark.Size = UDim2.new(0, 20, 0, 20)
+    quickPickCheckmark.Position = UDim2.new(0, 5, 0.5, -10)
+    quickPickCheckmark.BackgroundTransparency = 1
+    quickPickCheckmark.Text = HerbState.quickPickEnabled and "✓" or ""
+    quickPickCheckmark.TextColor3 = Color3.fromRGB(100, 255, 100)
+    quickPickCheckmark.Font = Enum.Font.SourceSansBold
+    quickPickCheckmark.TextSize = 16
+    
+    local quickPickLabel = Instance.new("TextLabel")
+    quickPickLabel.Name = "QuickPickLabel"
+    quickPickLabel.Size = UDim2.new(1, -30, 1, 0)
+    quickPickLabel.Position = UDim2.new(0, 30, 0, 0)
+    quickPickLabel.BackgroundTransparency = 1
+    quickPickLabel.Text = "一键加速"
+    quickPickLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    quickPickLabel.Font = Enum.Font.SourceSans
+    quickPickLabel.TextSize = UI.SMALL_TEXT_SIZE
+    quickPickLabel.TextXAlignment = Enum.TextXAlignment.Left
+    
+    -- 自动采摘复选框
+    local autoHarvestCheckbox = Instance.new("TextButton")
+    autoHarvestCheckbox.Name = "AutoHarvestCheckbox"
+    autoHarvestCheckbox.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
+    autoHarvestCheckbox.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 180)
+    autoHarvestCheckbox.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+    autoHarvestCheckbox.Text = ""
+    autoHarvestCheckbox.BorderSizePixel = 0
+    
+    local autoHarvestCheckmark = Instance.new("TextLabel")
+    autoHarvestCheckmark.Name = "AutoHarvestCheckmark"
+    autoHarvestCheckmark.Size = UDim2.new(0, 20, 0, 20)
+    autoHarvestCheckmark.Position = UDim2.new(0, 5, 0.5, -10)
+    autoHarvestCheckmark.BackgroundTransparency = 1
+    autoHarvestCheckmark.Text = HerbState.autoHarvestEnabled and "✓" or ""
+    autoHarvestCheckmark.TextColor3 = Color3.fromRGB(100, 255, 100)
+    autoHarvestCheckmark.Font = Enum.Font.SourceSansBold
+    autoHarvestCheckmark.TextSize = 16
+    
+    local autoHarvestLabel = Instance.new("TextLabel")
+    autoHarvestLabel.Name = "AutoHarvestLabel"
+    autoHarvestLabel.Size = UDim2.new(1, -30, 1, 0)
+    autoHarvestLabel.Position = UDim2.new(0, 30, 0, 0)
+    autoHarvestLabel.BackgroundTransparency = 1
+    autoHarvestLabel.Text = "自动采摘"
+    autoHarvestLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    autoHarvestLabel.Font = Enum.Font.SourceSans
+    autoHarvestLabel.TextSize = UI.SMALL_TEXT_SIZE
+    autoHarvestLabel.TextXAlignment = Enum.TextXAlignment.Left
+    
+    -- 功法自动收集复选框
+    local auraAutoCollectCheckbox = Instance.new("TextButton")
+    auraAutoCollectCheckbox.Name = "AuraAutoCollectCheckbox"
+    auraAutoCollectCheckbox.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
+    auraAutoCollectCheckbox.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 210)
+    auraAutoCollectCheckbox.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+    auraAutoCollectCheckbox.Text = ""
+    auraAutoCollectCheckbox.BorderSizePixel = 0
+    
+    local auraAutoCollectCheckmark = Instance.new("TextLabel")
+    auraAutoCollectCheckmark.Name = "AuraAutoCollectCheckmark"
+    auraAutoCollectCheckmark.Size = UDim2.new(0, 20, 0, 20)
+    auraAutoCollectCheckmark.Position = UDim2.new(0, 5, 0.5, -10)
+    auraAutoCollectCheckmark.BackgroundTransparency = 1
+    auraAutoCollectCheckmark.Text = HerbState.auraAutoCollectEnabled and "✓" or ""
+    auraAutoCollectCheckmark.TextColor3 = Color3.fromRGB(100, 255, 100)
+    auraAutoCollectCheckmark.Font = Enum.Font.SourceSansBold
+    auraAutoCollectCheckmark.TextSize = 16
+    
+    local auraAutoCollectLabel = Instance.new("TextLabel")
+    auraAutoCollectLabel.Name = "AuraAutoCollectLabel"
+    auraAutoCollectLabel.Size = UDim2.new(1, -30, 1, 0)
+    auraAutoCollectLabel.Position = UDim2.new(0, 30, 0, 0)
+    auraAutoCollectLabel.BackgroundTransparency = 1
+    auraAutoCollectLabel.Text = "功法自动收集"
+    auraAutoCollectLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    auraAutoCollectLabel.Font = Enum.Font.SourceSans
+    auraAutoCollectLabel.TextSize = UI.SMALL_TEXT_SIZE
+    auraAutoCollectLabel.TextXAlignment = Enum.TextXAlignment.Left
+    
+    -- 按钮区域
     local herbPriorityButton = Instance.new("TextButton")
     herbPriorityButton.Name = "HerbPriorityButton"
     herbPriorityButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbPriorityButton.Position = UDim2.new(0.025, 0, 0, 90)
+    herbPriorityButton.Position = UDim2.new(0.025, 0, 0, 240)
     herbPriorityButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
     herbPriorityButton.Text = "设置优先级"
     herbPriorityButton.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -4239,72 +4250,13 @@ local function createMainUI()
     local herbToggleButton = Instance.new("TextButton")
     herbToggleButton.Name = "HerbToggleButton"
     herbToggleButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbToggleButton.Position = UDim2.new(0.525, 0, 0, 90)
+    herbToggleButton.Position = UDim2.new(0.525, 0, 0, 240)
     herbToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
     herbToggleButton.Text = "启动系统"
     herbToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
     herbToggleButton.Font = Enum.Font.SourceSansBold
     herbToggleButton.TextSize = UI.BUTTON_TEXT_SIZE
     herbToggleButton.BorderSizePixel = 0
-    
-    local herbResetButton = Instance.new("TextButton")
-    herbResetButton.Name = "HerbResetButton"
-    herbResetButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbResetButton.Position = UDim2.new(0.025, 0, 0, 135)
-    herbResetButton.BackgroundColor3 = Color3.fromRGB(150, 150, 50)
-    herbResetButton.Text = "重置状态"
-    herbResetButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    herbResetButton.Font = Enum.Font.SourceSans
-    herbResetButton.TextSize = UI.BUTTON_TEXT_SIZE
-    herbResetButton.BorderSizePixel = 0
-    
-    -- 新增：一键加速按钮
-    local herbQuickPickButton = Instance.new("TextButton")
-    herbQuickPickButton.Name = "HerbQuickPickButton"
-    herbQuickPickButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbQuickPickButton.Position = UDim2.new(0.525, 0, 0, 135)
-    herbQuickPickButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
-    herbQuickPickButton.Text = "一键加速"
-    herbQuickPickButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    herbQuickPickButton.Font = Enum.Font.SourceSansBold
-    herbQuickPickButton.TextSize = UI.BUTTON_TEXT_SIZE
-    herbQuickPickButton.BorderSizePixel = 0
-    
-    -- 新增：自动采摘按钮
-    local herbAutoHarvestButton = Instance.new("TextButton")
-    herbAutoHarvestButton.Name = "HerbAutoHarvestButton"
-    herbAutoHarvestButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbAutoHarvestButton.Position = UDim2.new(0.025, 0, 0, 180)
-    herbAutoHarvestButton.BackgroundColor3 = Color3.fromRGB(150, 70, 70)
-    herbAutoHarvestButton.Text = "自动采摘"
-    herbAutoHarvestButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    herbAutoHarvestButton.Font = Enum.Font.SourceSansBold
-    herbAutoHarvestButton.TextSize = UI.BUTTON_TEXT_SIZE
-    herbAutoHarvestButton.BorderSizePixel = 0
-    
-    -- 新增：功法自动收集按钮（已移到草药系统）
-    local herbAuraAutoCollectButton = Instance.new("TextButton")
-    herbAuraAutoCollectButton.Name = "HerbAuraAutoCollectButton"
-    herbAuraAutoCollectButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbAuraAutoCollectButton.Position = UDim2.new(0.525, 0, 0, 180)
-    herbAuraAutoCollectButton.BackgroundColor3 = Color3.fromRGB(150, 100, 70)
-    herbAuraAutoCollectButton.Text = "功法自动收集"
-    herbAuraAutoCollectButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    herbAuraAutoCollectButton.Font = Enum.Font.SourceSansBold
-    herbAuraAutoCollectButton.TextSize = UI.BUTTON_TEXT_SIZE
-    herbAuraAutoCollectButton.BorderSizePixel = 0
-    
-    -- 新增：禁用地图碰撞按钮
-    local herbCollisionButton = Instance.new("TextButton")
-    herbCollisionButton.Name = "HerbCollisionButton"
-    herbCollisionButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbCollisionButton.Position = UDim2.new(0.025, 0, 0, 225)
-    herbCollisionButton.BackgroundColor3 = Color3.fromRGB(120, 70, 150)
-    herbCollisionButton.Text = "禁用地图碰撞"
-    herbCollisionButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    herbCollisionButton.Font = Enum.Font.SourceSansBold
-    herbCollisionButton.TextSize = UI.BUTTON_TEXT_SIZE
-    herbCollisionButton.BorderSizePixel = 0
     
     local herbInfoLabel = Instance.new("TextLabel")
     herbInfoLabel.Name = "HerbInfoLabel"
@@ -4570,96 +4522,95 @@ local function createMainUI()
         switchTab("pill")
     end)
     
+    -- 复选框事件
+collisionCheckbox.MouseButton1Click:Connect(function()
+    HerbState.collisionEnabled = not HerbState.collisionEnabled
+    collisionCheckmark.Text = HerbState.collisionEnabled and "✓" or ""
+    
+    -- 如果系统正在运行，立即应用更改
+    if HerbState.isRunning then
+        if HerbState.collisionEnabled then
+            disableAllCollisionInMap()
+        else
+            enableAllCollisionInMap()
+        end
+    end
+    
+    print("[系统] " .. (HerbState.collisionEnabled and "启用" or "禁用") .. "碰撞禁用功能")
+end)
+    
+quickPickCheckbox.MouseButton1Click:Connect(function()
+    HerbState.quickPickEnabled = not HerbState.quickPickEnabled
+    quickPickCheckmark.Text = HerbState.quickPickEnabled and "✓" or ""
+    
+    -- 如果系统正在运行，立即应用更改
+    if HerbState.isRunning and HerbState.quickPickEnabled then
+        setupQuickPickListener()
+    end
+    
+    print("[系统] " .. (HerbState.quickPickEnabled and "启用" or "禁用") .. "一键加速功能")
+end)
+    
+autoHarvestCheckbox.MouseButton1Click:Connect(function()
+    HerbState.autoHarvestEnabled = not HerbState.autoHarvestEnabled
+    autoHarvestCheckmark.Text = HerbState.autoHarvestEnabled and "✓" or ""
+    
+    -- 如果系统正在运行，立即应用更改
+    if HerbState.isRunning then
+        if HerbState.autoHarvestEnabled then
+            print("[自动采摘] 手动启动自动采摘")
+            startAutoHarvest()
+        else
+            print("[自动采摘] 手动停止自动采摘")
+            stopAutoHarvest()
+        end
+    end
+    
+    print("[系统] " .. (HerbState.autoHarvestEnabled and "启用" or "禁用") .. "自动采摘功能")
+end)
+
+    
+auraAutoCollectCheckbox.MouseButton1Click:Connect(function()
+    HerbState.auraAutoCollectEnabled = not HerbState.auraAutoCollectEnabled
+    auraAutoCollectCheckmark.Text = HerbState.auraAutoCollectEnabled and "✓" or ""
+    
+    -- 如果系统正在运行，立即应用更改
+    if HerbState.isRunning then
+        if HerbState.auraAutoCollectEnabled then
+            toggleAuraAutoCollect()  -- 这会启动功法收集
+        else
+            if AuraAutoCollectState.enabled then
+                toggleAuraAutoCollect()  -- 这会停止功法收集
+            end
+        end
+    end
+    
+    print("[系统] " .. (HerbState.auraAutoCollectEnabled and "启用" or "禁用") .. "功法自动收集功能")
+end)
+    
     -- 草药按钮事件
     herbPriorityButton.MouseButton1Click:Connect(function()
         print("[UI] 打开优先级选择界面")
         createPrioritySelectionUI()
     end)
     
-    herbToggleButton.MouseButton1Click:Connect(function()
-        if HerbState.isPriorityUIOpen then
-            print("[UI] 请先关闭优先级选择界面")
-            return
-        end
-        
-        if HerbState.isRunning then
-            stopHerbSystem()
-        else
-            -- 修复：启动系统时不强制改变目标模式
-            startHerbSystem()
-        end
-    end)
+herbToggleButton.MouseButton1Click:Connect(function()
+    if HerbState.isPriorityUIOpen then
+        print("[UI] 请先关闭优先级选择界面")
+        return
+    end
     
-    herbResetButton.MouseButton1Click:Connect(function()
-        print("[UI] 重置扫描状态")
-        resetScanState()
-    end)
-    
-    -- 一键加速按钮事件
-    herbQuickPickButton.MouseButton1Click:Connect(function()
-        local enabled = toggleQuickPick()
-        if enabled then
-            herbQuickPickButton.Text = "关闭加速"
-            herbQuickPickButton.BackgroundColor3 = Color3.fromRGB(0, 180, 0)
-        else
-            herbQuickPickButton.Text = "一键加速"
-            herbQuickPickButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
+    if HerbState.isRunning then
+        stopHerbSystem()
+        herbToggleButton.Text = "启动系统"
+        herbToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+    else
+        if startHerbSystem() then
+            herbToggleButton.Text = "停止系统"
+            herbToggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
         end
-    end)
-    
-    -- 自动采摘按钮事件
-    herbAutoHarvestButton.MouseButton1Click:Connect(function()
-        local enabled = toggleAutoHarvest()
-        if enabled then
-            herbAutoHarvestButton.Text = "关闭自动"
-            herbAutoHarvestButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-        else
-            herbAutoHarvestButton.Text = "自动采摘"
-            herbAutoHarvestButton.BackgroundColor3 = Color3.fromRGB(150, 70, 70)
-        end
-    end)
-    
-    -- 功法自动收集按钮事件
-    herbAuraAutoCollectButton.MouseButton1Click:Connect(function()
-        local enabled = toggleAuraAutoCollect()
-        if enabled then
-            herbAuraAutoCollectButton.Text = "关闭功法自动"
-            herbAuraAutoCollectButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-        else
-            herbAuraAutoCollectButton.Text = "功法自动收集"
-            herbAuraAutoCollectButton.BackgroundColor3 = Color3.fromRGB(150, 100, 70)
-        end
-    end)
-    
-    -- 禁用地图碰撞按钮事件
-    herbCollisionButton.MouseButton1Click:Connect(function()
-        if CollisionState.isCollisionDisabled then
-            print("[UI] 开始恢复地图碰撞...")
-            local success = enableAllCollisionInMap()
-            if success then
-                herbCollisionButton.Text = "禁用地图碰撞"
-                herbCollisionButton.BackgroundColor3 = Color3.fromRGB(120, 70, 150)
-            end
-        else
-            print("[UI] 开始禁用Map文件夹中的所有碰撞属性")
-            local success = disableAllCollisionInMap()
-            if success then
-                herbCollisionButton.Text = "已禁用碰撞"
-                herbCollisionButton.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
-            else
-                herbCollisionButton.Text = "操作失败"
-                herbCollisionButton.BackgroundColor3 = Color3.fromRGB(150, 0, 0)
-                
-                -- 3秒后恢复按钮文本
-                task.delay(3, function()
-                    if herbCollisionButton then
-                        herbCollisionButton.Text = "禁用地图碰撞"
-                        herbCollisionButton.BackgroundColor3 = Color3.fromRGB(120, 70, 150)
-                    end
-                end)
-            end
-        end
-    end)
+    end
+end)
     
     -- 功法按钮事件
     auraModeButton.MouseButton1Click:Connect(function()
@@ -4789,13 +4740,26 @@ local function createMainUI()
     herbStatusLabel.Parent = herbContentFrame
     herbTargetLabel.Parent = herbContentFrame
     herbPriorityLabel.Parent = herbContentFrame
+    herbFunctionLabel.Parent = herbContentFrame
+    
+    collisionCheckbox.Parent = herbContentFrame
+    collisionCheckmark.Parent = collisionCheckbox
+    collisionLabel.Parent = collisionCheckbox
+    
+    quickPickCheckbox.Parent = herbContentFrame
+    quickPickCheckmark.Parent = quickPickCheckbox
+    quickPickLabel.Parent = quickPickCheckbox
+    
+    autoHarvestCheckbox.Parent = herbContentFrame
+    autoHarvestCheckmark.Parent = autoHarvestCheckbox
+    autoHarvestLabel.Parent = autoHarvestCheckbox
+    
+    auraAutoCollectCheckbox.Parent = herbContentFrame
+    auraAutoCollectCheckmark.Parent = auraAutoCollectCheckbox
+    auraAutoCollectLabel.Parent = auraAutoCollectCheckbox
+    
     herbPriorityButton.Parent = herbContentFrame
     herbToggleButton.Parent = herbContentFrame
-    herbResetButton.Parent = herbContentFrame
-    herbQuickPickButton.Parent = herbContentFrame
-    herbAutoHarvestButton.Parent = herbContentFrame
-    herbAuraAutoCollectButton.Parent = herbContentFrame
-    herbCollisionButton.Parent = herbContentFrame
     herbInfoLabel.Parent = herbContentFrame
     
     auraStatusLabel.Parent = auraContentFrame
@@ -4892,34 +4856,21 @@ local function createMainUI()
                 end
             end
             
-            if herbQuickPickButton then
-                if HerbState.quickPickEnabled then
-                    herbQuickPickButton.Text = "关闭加速"
-                    herbQuickPickButton.BackgroundColor3 = Color3.fromRGB(0, 180, 0)
-                else
-                    herbQuickPickButton.Text = "一键加速"
-                    herbQuickPickButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
-                end
+            -- 更新复选框状态
+            if collisionCheckmark then
+                collisionCheckmark.Text = HerbState.collisionEnabled and "✓" or ""
             end
             
-            if herbAutoHarvestButton then
-                if HerbState.autoHarvestEnabled then
-                    herbAutoHarvestButton.Text = "关闭自动"
-                    herbAutoHarvestButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-                else
-                    herbAutoHarvestButton.Text = "自动采摘"
-                    herbAutoHarvestButton.BackgroundColor3 = Color3.fromRGB(150, 70, 70)
-                end
+            if quickPickCheckmark then
+                quickPickCheckmark.Text = HerbState.quickPickEnabled and "✓" or ""
             end
             
-            if herbAuraAutoCollectButton then
-                if AuraAutoCollectState.enabled then
-                    herbAuraAutoCollectButton.Text = "关闭功法自动"
-                    herbAuraAutoCollectButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-                else
-                    herbAuraAutoCollectButton.Text = "功法自动收集"
-                    herbAuraAutoCollectButton.BackgroundColor3 = Color3.fromRGB(150, 100, 70)
-                end
+            if autoHarvestCheckmark then
+                autoHarvestCheckmark.Text = HerbState.autoHarvestEnabled and "✓" or ""
+            end
+            
+            if auraAutoCollectCheckmark then
+                auraAutoCollectCheckmark.Text = HerbState.auraAutoCollectEnabled and "✓" or ""
             end
             
             -- 功法UI更新
@@ -5002,17 +4953,16 @@ end
 
 -- ===================== 主初始化 =====================
 print("=== 多功能采集系统 ===")
-print("版本: 完整功能修复版 + 地图碰撞禁用修复 + 基于原始代码的防AFK")
+print("版本: 整合功能版 - 碰撞/加速/自动采摘整合到启动系统")
 print("主要功能:")
-print("1. 草药系统: 优先级草药选择 + 一键加速 + 自动采摘 + 功法自动收集")
+print("1. 草药系统: 优先级草药选择 + 整合功能启动")
 print("2. 功法系统: 修复下降问题，优化搜索")
 print("3. 修炼系统: 自动突破 (间隔: " .. CONFIG.BREAKTHROUGH_INTERVAL .. "秒)")
 print("4. 炼药系统: 独立设置界面 (支持 " .. #CONFIG.PILL_TYPES .. " 种丹药)")
-print("5. 修复: 地图碰撞禁用 - 解决碰撞恢复问题")
-print("6. 基于原始代码的防AFK系统 (55秒间隔)")
+print("5. 整合功能: 碰撞禁用、一键加速、自动采摘、功法自动收集")
 
 -- 启动防AFK系统 - 先等待游戏完全加载
-task.wait(3) -- 等待3秒让游戏完全加载
+task.wait(3)
 setupAntiAFK()
 
 -- 预加载草药类型
@@ -5024,103 +4974,10 @@ createMobileToggle()
 -- 创建主UI
 createMainUI()
 
--- 添加防AFK系统健康检查
-task.spawn(function()
-    task.wait(5) -- 等待5秒让游戏完全加载
-    
-    print("[系统初始化] 启动防AFK系统...")
-    
-    -- 尝试启动防AFK系统
-    local success = setupAntiAFK()
-    if not success then
-        print("[系统初始化] 防AFK系统启动失败，将在30秒后重试")
-        
-        -- 延迟重试
-        task.delay(30, function()
-            print("[系统初始化] 重试启动防AFK系统...")
-            setupAntiAFK()
-        end)
-    end
-end)
-
 print("=== 系统初始化完成 ===")
-
--- ===================== 修复定期检查和自动重启机制 =====================
-task.spawn(function()
-    task.wait(10) -- 等待10秒再开始检查
-    
-    while true do
-        task.wait(60) -- 每60秒检查一次所有系统状态
-        
-        -- 检查防AFK系统是否在运行
-        if not AntiAFKState.IsRunning then
-            print("[系统检查] 防AFK系统停止，正在重新启动...")
-            
-            -- 等待1秒避免频繁重启
-            task.wait(1)
-            
-            -- 尝试重新启动
-            local success = pcall(function()
-                setupAntiAFK()
-            end)
-            
-            if not success then
-                print("[系统检查] 防AFK系统重启失败，将在下次检查时重试")
-            end
-        else
-            -- 运行健康检查
-            local healthOk = checkAntiAFKHealth()
-            if not healthOk then
-                print("[系统检查] 防AFK系统健康检查未通过")
-            end
-        end
-        
-        -- 检查碰撞状态（如果已启用）
-        if CollisionState.isCollisionDisabled then
-            -- 检查是否有部分对象的碰撞被恢复了
-            local anyCollisionEnabled = false
-            local restoredCount = 0
-            
-            for part, originalState in pairs(CollisionState.originalCollisionStates) do
-                if part and part.Parent and part.CanCollide == true then
-                    anyCollisionEnabled = true
-                    restoredCount = restoredCount + 1
-                    
-                    -- 重新禁用碰撞
-                    pcall(function()
-                        part.CanCollide = false
-                    end)
-                end
-            end
-            
-            if anyCollisionEnabled and restoredCount > 0 then
-                print("[系统检查] 检测到 " .. restoredCount .. " 个对象碰撞被恢复，已重新禁用")
-            end
-        end
-        
-        -- 检查草药系统状态
-        if HerbState.isRunning then
-            -- 检查是否有长时间没有进展
-            local currentTime = tick()
-            local lastTargetTime = HerbState.lastTargetTime or 0
-            
-            if currentTime - lastTargetTime > 180 then  -- 3分钟没有新目标
-                print("[系统检查] 长时间没有找到新目标，执行深度清理")
-                enhancedCleanup()
-                HerbState.lastTargetTime = currentTime
-            end
-        end
-    end
-end)
 
 -- ===================== 修复角色重生处理 =====================
 local wasHerbRunningBeforeDeath = false
-local wasAutoHarvestEnabled = false
-local wasQuickPickEnabled = false
-local wasAuraAutoCollectEnabled = false
-local wasCultivating = false
-local wasAutoBreakthrough = false
-local wasCrafting = false
 local wasCollisionDisabled = false
 local currentTargetMode = "both" -- 保存当前目标模式
 
@@ -5129,27 +4986,14 @@ player.CharacterRemoving:Connect(function()
     
     -- 记录所有系统状态
     wasHerbRunningBeforeDeath = HerbState.isRunning
-    wasAutoHarvestEnabled = HerbState.autoHarvestEnabled
-    wasQuickPickEnabled = HerbState.quickPickEnabled
-    wasAuraAutoCollectEnabled = AuraAutoCollectState.enabled
-    wasCultivating = CultState.isCultivating
-    wasAutoBreakthrough = CultState.isAutoBreakthrough
-    wasCrafting = PillState.isCrafting
     wasCollisionDisabled = CollisionState.isCollisionDisabled
     currentTargetMode = HerbState.targetMode
     
     print("[重生] 状态记录完成:")
     print("- 草药系统: " .. tostring(wasHerbRunningBeforeDeath))
-    print("- 自动采摘: " .. tostring(wasAutoHarvestEnabled))
-    print("- 一键加速: " .. tostring(wasQuickPickEnabled))
-    print("- 功法自动收集: " .. tostring(wasAuraAutoCollectEnabled))
-    print("- 修炼状态: " .. tostring(wasCultivating))
-    print("- 自动突破: " .. tostring(wasAutoBreakthrough))
-    print("- 炼药状态: " .. tostring(wasCrafting))
     print("- 碰撞禁用: " .. tostring(wasCollisionDisabled))
     print("- 目标模式: " .. currentTargetMode)
     
-    -- 注意：不要停止防AFK系统，让它继续运行
     print("[重生] 防AFK系统继续运行，不停止")
 end)
 
@@ -5180,21 +5024,6 @@ player.CharacterAdded:Connect(function(newChar)
     if PillState.isCrafting then
         stopCraftPills()
     end
-    
-    -- 重置自动采摘
-    if HerbState.autoHarvestEnabled then
-        toggleAutoHarvest()
-    end
-    
-    -- 重置一键加速
-    if HerbState.quickPickEnabled then
-        toggleQuickPick()
-    end
-    
-    -- 重置功法自动收集
-    if AuraAutoCollectState.enabled then
-        toggleAuraAutoCollect()
-    end
 
     -- 等待3秒让角色完全加载
     task.wait(3)
@@ -5213,7 +5042,7 @@ player.CharacterAdded:Connect(function(newChar)
     end
     
     -- 如果碰撞之前是禁用的，重新应用
-    if wasCollisionDisabled then
+    if wasCollisionDisabled and HerbState.collisionEnabled then
         print("[重生] 重新应用地图碰撞禁用...")
         
         -- 关键修复：等待地图完全加载，然后重新应用碰撞禁用
@@ -5251,49 +5080,10 @@ player.CharacterAdded:Connect(function(newChar)
     -- 恢复目标模式
     HerbState.targetMode = currentTargetMode
     
-    -- 根据重生前的状态重新启动系统
-    print("[重生] 恢复重生前的系统状态...")
-    
-    -- 恢复功法自动收集
-    if wasAuraAutoCollectEnabled and not AuraAutoCollectState.enabled then
-        print("[重生] 恢复功法自动收集")
-        toggleAuraAutoCollect()
-    end
-    
-    -- 恢复自动采摘
-    if wasAutoHarvestEnabled and not HerbState.autoHarvestEnabled then
-        print("[重生] 恢复自动采摘")
-        toggleAutoHarvest()
-    end
-    
-    -- 恢复一键加速
-    if wasQuickPickEnabled and not HerbState.quickPickEnabled then
-        print("[重生] 恢复一键加速")
-        toggleQuickPick()
-    end
-    
-    -- 恢复修炼状态
-    if wasCultivating and not CultState.isCultivating then
-        print("[重生] 恢复修炼状态")
-        toggleCultivation()
-        
-        -- 恢复自动突破
-        if wasAutoBreakthrough and not CultState.isAutoBreakthrough then
-            print("[重生] 恢复自动突破")
-            startAutoBreakthrough()
-        end
-    end
-    
     -- 恢复草药系统
     if wasHerbRunningBeforeDeath and not HerbState.isRunning then
         print("[重生] 恢复草药采集系统")
         startHerbSystem()
-    end
-    
-    -- 恢复炼药系统
-    if wasCrafting and not PillState.isCrafting then
-        print("[重生] 恢复炼药系统")
-        startCraftPills(PillState.currentPillType, PillState.craftCount)
     end
     
     -- 重新创建UI
@@ -5314,7 +5104,6 @@ player.CharacterAdded:Connect(function(newChar)
     createMainUI()
     
     -- 重要修复：防AFK系统应该一直运行，不要停止或重启
-    -- 如果防AFK连接意外断开，重新启动它
     if AntiAFKState.IsRunning then
         print("[重生] 防AFK系统正在运行，保持连接")
     else
@@ -5322,26 +5111,6 @@ player.CharacterAdded:Connect(function(newChar)
         task.delay(5, function()
             setupAntiAFK()
         end)
-    end
-
-    -- 更新UI按钮状态
-    if MainUI and MainUI.Enabled then
-        -- 更新UI显示状态
-        task.wait(0.5)
-        
-        -- 关键修复：更新碰撞禁用按钮状态
-        local herbCollisionButton = MainUI:FindFirstChild("MainFrame", true):FindFirstChild("HerbCollisionButton", true)
-        if herbCollisionButton then
-            if CollisionState.isCollisionDisabled then
-                herbCollisionButton.Text = "已禁用碰撞"
-                herbCollisionButton.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
-            else
-                herbCollisionButton.Text = "禁用地图碰撞"
-                herbCollisionButton.BackgroundColor3 = Color3.fromRGB(120, 70, 150)
-            end
-        end
-        
-        print("[重生] UI状态已更新")
     end
 end)
 
@@ -5352,71 +5121,8 @@ player.CharacterAdded:Connect(function()
     task.wait(3)
     
     -- 重新启动防AFK
-    if not AntiAFKState.isRunning then
-        setupAntiAFK()
-    end
-end)
-
--- ===================== 修复：添加防AFK系统重新连接功能 =====================
-local function reconnectAntiAFKIfNeeded()
     if not AntiAFKState.IsRunning then
-        print("[防AFK重连] 防AFK系统未运行，尝试重新连接")
-        return setupAntiAFK()
-    end
-    
-    -- 检查连接状态
-    local activeConnections = 0
-    for _, conn in pairs(AntiAFKState.Connections) do
-        if conn and conn.Connected then
-            activeConnections = activeConnections + 1
-        end
-    end
-    
-    -- 如果活跃连接数太少，重新连接
-    if activeConnections < 2 and #AntiAFKState.Connections >= 2 then
-        print("[防AFK重连] 连接数不足 (" .. activeConnections .. "/" .. #AntiAFKState.Connections .. ")，重新连接")
-        stopAntiAFK()
-        task.wait(1)
-        return setupAntiAFK()
-    end
-    
-    return true
-end
-
--- 每5分钟检查一次防AFK连接状态
-task.spawn(function()
-    while true do
-        task.wait(300) -- 5分钟
-        reconnectAntiAFKIfNeeded()
-    end
-end)
-
--- ===================== 修复地图碰撞禁用的定期检查和恢复 =====================
-task.spawn(function()
-    while true do
-        task.wait(30) -- 每30秒检查一次碰撞状态
-        
-        if CollisionState.isCollisionDisabled then
-            -- 检查是否有部分对象的碰撞被恢复了
-            local anyCollisionEnabled = false
-            local restoredCount = 0
-            
-            for part, originalState in pairs(CollisionState.originalCollisionStates) do
-                if part and part.Parent and part.CanCollide == true then
-                    anyCollisionEnabled = true
-                    restoredCount = restoredCount + 1
-                    
-                    -- 重新禁用碰撞
-                    pcall(function()
-                        part.CanCollide = false
-                    end)
-                end
-            end
-            
-            if anyCollisionEnabled and restoredCount > 0 then
-                print("[碰撞检查] 检测到 " .. restoredCount .. " 个对象碰撞被恢复，已重新禁用")
-            end
-        end
+        setupAntiAFK()
     end
 end)
 
