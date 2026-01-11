@@ -36,6 +36,14 @@ local CONFIG = {
     MAX_PRIORITY_HERBS = 6,
     UI_UPDATE_INTERVAL = 1,
     
+    -- 新增：手机端优化配置
+    MOBILE_OPTIMIZATION = {
+        CACHE_CLEAN_INTERVAL = 60, -- 缓存清理间隔(秒)，从180改为60
+        MAX_CACHE_SIZE = 50, -- 最大缓存数量，从100改为50
+        SCAN_COOLDOWN = 0.3, -- 扫描冷却时间(秒)
+        MEMORY_MONITOR_INTERVAL = 30, -- 内存监控间隔(秒)
+    },
+    
     -- 修炼配置
     BREAKTHROUGH_INTERVAL = 3,
 
@@ -105,14 +113,27 @@ local HerbState = {
     autoHarvestConnection = nil,  -- 自动采摘连接
     modifiedHerbs = {},  -- 已修改采摘时间的草药记录
     herbsFolderListener = nil,  -- 草药文件夹监听器
-    quickPickConnection = nil  -- 一键加速连接器
+    quickPickConnection = nil,  -- 一键加速连接器
+    
+    -- 新增：手机端优化状态
+    lastScanTime = 0,
+    scanCount = 0,
+    lastCacheCleanTime = 0,
+    memoryCheckConnection = nil,
+    cacheCleanConnection = nil,
+    mobilePerformanceMode = UserInputService.TouchEnabled, -- 自动检测是否为移动设备
+    lowMemoryMode = false, -- 低内存模式
+    cacheSize = 0,
+    lastMemoryCheck = 0,
+    scanErrors = 0,
+    lastErrorTime = 0
 }
 
 local AuraAutoCollectState = {
     enabled = false,  -- 是否启用功法自动收集
     connection = nil,  -- 连接器
     lastCollectTime = 0,
-    collectInterval = 0.5,  -- 收集间隔（秒） - 从0.5改为0.1
+    collectInterval = 0.5,  -- 收集间隔（秒）- 从0.5改为0.1
     maxDistance = 15,  -- 最大收集距离 - 从10改为15
 }
 
@@ -150,6 +171,285 @@ local PillState = {
     isPillUIOpen = false
 }
 
+-- ===================== 新增：手机端优化函数 =====================
+
+-- 清理无效缓存
+local function cleanInvalidCache()
+    if not HerbState.mobilePerformanceMode and not HerbState.lowMemoryMode then
+        return
+    end
+    
+    local currentTime = tick()
+    local cleanedCount = 0
+    
+    -- 清理collectedHerbs缓存
+    local validCollectedHerbs = {}
+    for herb, _ in pairs(HerbState.collectedHerbs) do
+        if herb and herb.Parent then
+            validCollectedHerbs[herb] = true
+        else
+            cleanedCount = cleanedCount + 1
+        end
+    end
+    HerbState.collectedHerbs = validCollectedHerbs
+    
+    -- 清理timeoutHerbs缓存
+    local validTimeoutHerbs = {}
+    for herb, timeoutTime in pairs(HerbState.timeoutHerbs) do
+        if herb and herb.Parent then
+            -- 检查是否已过期
+            if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
+                validTimeoutHerbs[herb] = timeoutTime
+            else
+                cleanedCount = cleanedCount + 1
+            end
+        else
+            cleanedCount = cleanedCount + 1
+        end
+    end
+    HerbState.timeoutHerbs = validTimeoutHerbs
+    
+    -- 清理herbAgeCache缓存
+    local validHerbAgeCache = {}
+    local cacheSize = 0
+    for herb, age in pairs(HerbState.herbAgeCache) do
+        if herb and herb.Parent then
+            validHerbAgeCache[herb] = age
+            cacheSize = cacheSize + 1
+            -- 限制缓存大小
+            if cacheSize >= CONFIG.MOBILE_OPTIMIZATION.MAX_CACHE_SIZE then
+                break
+            end
+        else
+            cleanedCount = cleanedCount + 1
+        end
+    end
+    HerbState.herbAgeCache = validHerbAgeCache
+    
+    -- 清理modifiedHerbs缓存
+    local validModifiedHerbs = {}
+    for herb, _ in pairs(HerbState.modifiedHerbs) do
+        if herb and herb.Parent then
+            validModifiedHerbs[herb] = true
+        else
+            cleanedCount = cleanedCount + 1
+        end
+    end
+    HerbState.modifiedHerbs = validModifiedHerbs
+    
+    HerbState.cacheSize = cacheSize
+    HerbState.lastCacheCleanTime = currentTime
+    
+    if cleanedCount > 0 then
+        print(string.format("[手机优化] 清理了 %d 个无效缓存对象，当前缓存大小: %d", cleanedCount, cacheSize))
+    end
+    
+    return cleanedCount
+end
+
+-- 内存监控
+local function monitorMemory()
+    if not HerbState.mobilePerformanceMode then
+        return
+    end
+    
+    local currentTime = tick()
+    if currentTime - HerbState.lastMemoryCheck < CONFIG.MOBILE_OPTIMIZATION.MEMORY_MONITOR_INTERVAL then
+        return
+    end
+    
+    HerbState.lastMemoryCheck = currentTime
+    
+    -- 检查缓存大小
+    local totalCacheSize = 0
+    totalCacheSize = totalCacheSize + countTableSize(HerbState.collectedHerbs)
+    totalCacheSize = totalCacheSize + countTableSize(HerbState.timeoutHerbs)
+    totalCacheSize = totalCacheSize + countTableSize(HerbState.herbAgeCache)
+    totalCacheSize = totalCacheSize + countTableSize(HerbState.modifiedHerbs)
+    
+    -- 根据缓存大小调整性能模式
+    if totalCacheSize > 80 then
+        HerbState.lowMemoryMode = true
+        print("[手机优化] 进入低内存模式，缓存大小: " .. totalCacheSize)
+    elseif totalCacheSize < 30 then
+        HerbState.lowMemoryMode = false
+    end
+    
+    -- 如果缓存过大，强制清理
+    if totalCacheSize > 100 then
+        print("[手机优化] 缓存过大(" .. totalCacheSize .. ")，强制清理")
+        HerbState.collectedHerbs = {}
+        HerbState.timeoutHerbs = {}
+        HerbState.herbAgeCache = {}
+        HerbState.modifiedHerbs = {}
+    end
+end
+
+-- 计算表大小
+local function countTableSize(tbl)
+    if not tbl then return 0 end
+    local count = 0
+    for _ in pairs(tbl) do
+        count = count + 1
+    end
+    return count
+end
+
+-- 优化版扫描草药函数
+local function scanHerbsOptimized()
+    -- 手机端扫描冷却
+    if HerbState.mobilePerformanceMode then
+        local currentTime = tick()
+        if currentTime - HerbState.lastScanTime < CONFIG.MOBILE_OPTIMIZATION.SCAN_COOLDOWN then
+            return {}
+        end
+        HerbState.lastScanTime = currentTime
+    end
+    
+    local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
+    if not herbsFolder then 
+        -- 尝试其他名称
+        for _, child in ipairs(Workspace:GetChildren()) do
+            if child.Name:match("Herb") or child.Name:match("草药") then
+                herbsFolder = child
+                break
+            end
+        end
+        
+        if not herbsFolder then
+            HerbState.scanErrors = HerbState.scanErrors + 1
+            
+            -- 如果连续扫描失败，清理缓存
+            if HerbState.scanErrors >= 5 then
+                print("[扫描优化] 连续5次未找到草药文件夹，清理缓存")
+                HerbState.collectedHerbs = {}
+                HerbState.timeoutHerbs = {}
+                HerbState.herbAgeCache = {}
+                HerbState.scanErrors = 0
+            end
+            
+            return {} 
+        else
+            print("[扫描优化] 找到替代草药文件夹：" .. herbsFolder.Name)
+            HerbState.scanErrors = 0
+        end
+    else
+        HerbState.scanErrors = 0
+    end
+
+    local validHerbs = {}
+    local currentTime = tick()
+    HerbState.scanCount = HerbState.scanCount + 1
+    
+    -- 定期清理缓存
+    if HerbState.mobilePerformanceMode or HerbState.lowMemoryMode then
+        if currentTime - HerbState.lastCacheCleanTime > CONFIG.MOBILE_OPTIMIZATION.CACHE_CLEAN_INTERVAL then
+            cleanInvalidCache()
+        end
+    end
+    
+    -- 扫描所有草药对象（优化版，限制扫描数量）
+    local scanLimit = HerbState.mobilePerformanceMode and 20 or 50
+    local scannedCount = 0
+    
+    for _, item in ipairs(herbsFolder:GetChildren()) do
+        if scannedCount >= scanLimit then
+            break
+        end
+        
+        if not item or not item.Parent then
+            continue
+        end
+        
+        -- 检查是否是黑名单草药
+        local isBlacklisted = false
+        for _, blacklistName in ipairs(CONFIG.BLACKLIST_HERBS) do
+            if item.Name == blacklistName or item.Name:match(blacklistName) then
+                isBlacklisted = true
+                break
+            end
+        end
+        
+        if isBlacklisted then
+            continue
+        end
+        
+        scannedCount = scannedCount + 1
+        
+        -- 如果开启了一键加速，修改采摘时间
+        if HerbState.quickPickEnabled then
+            modifySingleHerbPickTime(item)
+        end
+        
+        -- 优化：快速检查是否已采集或超时
+        local isCollected = HerbState.collectedHerbs[item]
+        local isTimedOut = HerbState.timeoutHerbs[item] and 
+                          (currentTime - HerbState.timeoutHerbs[item] < CONFIG.TIMEOUT_COOLDOWN)
+        
+        local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == item)
+        
+        -- 支持多种类型的草药对象
+        local isValidType = item:IsA("MeshPart") or item:IsA("Part") or item:IsA("Model")
+        
+        if isValidType and not isCollected and not isTimedOut and (not isCurrentTarget or not item.Parent) then
+            -- 如果是Model，检查其中是否有可交互的部分
+            if item:IsA("Model") then
+                if item.PrimaryPart or #item:GetChildren() > 0 then
+                    table.insert(validHerbs, item)
+                end
+            else
+                table.insert(validHerbs, item)
+            end
+        end
+    end
+    
+    if #validHerbs == 0 and HerbState.mobilePerformanceMode then
+        -- 手机端如果没有找到草药，强制清理缓存
+        if HerbState.scanCount % 10 == 0 then
+            print("[扫描优化] 长时间未找到草药，强制清理缓存")
+            cleanInvalidCache()
+        end
+    end
+    
+    return validHerbs
+end
+
+-- 启动手机端优化
+local function startMobileOptimization()
+    if not HerbState.mobilePerformanceMode then
+        return
+    end
+    
+    print("[手机优化] 启动移动设备优化模式")
+    
+    -- 启动缓存清理连接
+    if HerbState.cacheCleanConnection then
+        HerbState.cacheCleanConnection:Disconnect()
+    end
+    
+    HerbState.cacheCleanConnection = RunService.Heartbeat:Connect(function()
+        monitorMemory()
+        
+        -- 每30秒自动清理一次缓存
+        if tick() - HerbState.lastCacheCleanTime > CONFIG.MOBILE_OPTIMIZATION.CACHE_CLEAN_INTERVAL then
+            cleanInvalidCache()
+        end
+    end)
+end
+
+-- 停止手机端优化
+local function stopMobileOptimization()
+    if HerbState.cacheCleanConnection then
+        HerbState.cacheCleanConnection:Disconnect()
+        HerbState.cacheCleanConnection = nil
+    end
+    
+    if HerbState.memoryCheckConnection then
+        HerbState.memoryCheckConnection:Disconnect()
+        HerbState.memoryCheckConnection = nil
+    end
+end
+
 -- ===================== 修复：地图碰撞禁用功能 =====================
 local function disableAllCollisionInMap()
     local mapFolder = Workspace:FindFirstChild("Map")
@@ -181,7 +481,6 @@ local function disableAllCollisionInMap()
                 -- 监听碰撞属性的变化
                 local connection = item:GetPropertyChangedSignal("CanCollide"):Connect(function()
                     if item.CanCollide == true then
-                        -- print(string.format("[碰撞修改] 检测到碰撞恢复: %s，重新禁用", item.Name))
                         item.CanCollide = false
                     end
                 end)
@@ -213,12 +512,10 @@ local function disableAllCollisionInMap()
                 -- 保存原始碰撞状态
                 CollisionState.originalCollisionStates[descendant] = descendant.CanCollide
                 descendant.CanCollide = false
-                -- print(string.format("[碰撞修改] 新对象已禁用碰撞: %s", descendant.Name))
                 
                 -- 监听新对象的碰撞变化
                 local connection = descendant:GetPropertyChangedSignal("CanCollide"):Connect(function()
                     if descendant.CanCollide == true then
-                        -- print(string.format("[碰撞修改] 检测到新对象碰撞恢复: %s，重新禁用", descendant.Name))
                         descendant.CanCollide = false
                     end
                 end)
@@ -1308,7 +1605,7 @@ local function enableFlight()
     end)
     
     HerbState.IsFlying = true
-    -- print("[飞行] 飞行模式已启用，高度: " .. CONFIG.FLY_HEIGHT .. "米")
+    return
 end
 
 -- ===================== 修复：功法位置获取优化 =====================
@@ -1510,103 +1807,8 @@ local function getHerbPriority(herbName)
     return nil
 end
 
-local function scanHerbs()
-    local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
-    if not herbsFolder then 
-        warn("[扫描] 未找到草药文件夹：" .. CONFIG.HERBS_FOLDER_NAME)
-        
-        -- 尝试其他名称
-        for _, child in ipairs(Workspace:GetChildren()) do
-            if child.Name:match("Herb") or child.Name:match("草药") then
-                herbsFolder = child
-                break
-            end
-        end
-        
-        if not herbsFolder then
-            return {} 
-        else
-            print("[扫描] 找到替代草药文件夹：" .. herbsFolder.Name)
-        end
-    end
-
-    local validHerbs = {}
-    local currentTime = tick()
-    
-    -- 清理过期的超时记录
-    for herb, timeoutTime in pairs(HerbState.timeoutHerbs) do
-        if currentTime - timeoutTime > CONFIG.TIMEOUT_COOLDOWN then
-            HerbState.timeoutHerbs[herb] = nil
-        end
-    end
-    
-    -- 扫描所有草药对象
-    for _, item in ipairs(herbsFolder:GetChildren()) do
-        if not item or not item.Parent then
-            continue
-        end
-        
-        -- 检查是否是黑名单草药
-        local isBlacklisted = false
-        for _, blacklistName in ipairs(CONFIG.BLACKLIST_HERBS) do
-            if item.Name == blacklistName or item.Name:match(blacklistName) then
-                isBlacklisted = true
-                print(string.format("[扫描] 跳过黑名单草药: %s", item.Name))
-                break
-            end
-        end
-        
-        if isBlacklisted then
-            continue
-        end
-        
-        -- 如果开启了一键加速，修改采摘时间
-        if HerbState.quickPickEnabled then
-            modifySingleHerbPickTime(item)
-        end
-        
-        -- 检查是否已采集
-        local isCollected = false
-        for collectedHerb, _ in pairs(HerbState.collectedHerbs) do
-            if collectedHerb and collectedHerb == item then
-                isCollected = true
-                break
-            end
-        end
-        
-        -- 检查是否超时
-        local isTimedOut = false
-        for timeoutHerb, timeoutTime in pairs(HerbState.timeoutHerbs) do
-            if timeoutHerb and timeoutHerb == item then
-                if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
-                    isTimedOut = true
-                end
-                break
-            end
-        end
-        
-        local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == item)
-        
-        -- 支持多种类型的草药对象
-        local isValidType = item:IsA("MeshPart") or item:IsA("Part") or item:IsA("Model")
-        
-        if isValidType and not isCollected and not isTimedOut and (not isCurrentTarget or not item.Parent) then
-            -- 如果是Model，检查其中是否有可交互的部分
-            if item:IsA("Model") then
-                -- 检查Model是否有PrimaryPart或者任何MeshPart/Part
-                if item.PrimaryPart or #item:GetChildren() > 0 then
-                    table.insert(validHerbs, item)
-                end
-            else
-                table.insert(validHerbs, item)
-            end
-        end
-    end
-    
-    print(string.format("[扫描] 找到有效草药数量：%d", #validHerbs))
-    
-    return validHerbs
-end
+-- ===================== 使用优化版扫描函数替换原函数 =====================
+local scanHerbs = scanHerbsOptimized
 
 local function filterHerbsByPriority(herbs)
     if #HerbState.priorityHerbs == 0 then
@@ -1826,7 +2028,6 @@ local function flyToTarget(target, isAura)
     end
 
     local targetType = isAura and "功法" or "草药"
-    -- print(string.format("[飞行] 开始前往%s：%s", targetType, target.Name))
     local startTime = tick()
     
     -- 重置飞行组件速度
@@ -1889,13 +2090,6 @@ local function flyToTarget(target, isAura)
         local verticalDistance = math.abs(flyHeight - currentPos.Y)
         local totalDistance = (targetFlyPos - currentPos).Magnitude
         
-        -- 每10次检查打印一次距离信息
-        --checkCount = checkCount + 1
-        --if checkCount % 10 == 0 then
-        --    print(string.format("[飞行] 水平距离: %.2f米，垂直距离: %.2f米，总距离: %.2f米", 
-        --        actualHorizontalDistance, verticalDistance, totalDistance))
-        --end
-
         -- 关键修复：到达判断 - 当水平距离小于阈值时，就认为到达
         if actualHorizontalDistance <= CONFIG.MOVE_DISTANCE_THRESHOLD then
             if HerbState.FlightBodyVelocity then
@@ -1956,10 +2150,6 @@ local function flyToTarget(target, isAura)
         -- 确保BodyVelocity存在并设置速度
         if HerbState.FlightBodyVelocity then
             HerbState.FlightBodyVelocity.Velocity = velocity
-            --if checkCount % 30 == 0 then
-            --     print(string.format("[飞行] 设置速度向量: (%.1f, %.1f, %.1f)，速度大小: %.1f", 
-            --        velocity.X, velocity.Y, velocity.Z, velocity.Magnitude))
-            --end
         else
             warn("[飞行] FlightBodyVelocity不存在")
             return false
@@ -2056,7 +2246,6 @@ local function descendToCollectHeight(target, isAura)
     
     if success and result then
         targetPos = result
-        print("[" .. targetType .. "下降] 通过ProximityPrompt找到位置: " .. tostring(targetPos))
     else
         -- 方法2：使用之前的方法作为备用
         if isAura then
@@ -2074,7 +2263,6 @@ local function descendToCollectHeight(target, isAura)
                 targetPos = posResult
             end
         end
-        print("[" .. targetType .. "下降] 使用备用方法获取位置: " .. tostring(targetPos))
     end
     
     -- 检查是否获取到有效位置
@@ -2099,10 +2287,6 @@ local function descendToCollectHeight(target, isAura)
     end
     
     local finalTargetPos = Vector3.new(targetPos.X, targetHeight, targetPos.Z)
-    
-    print("[下降] 最终目标位置: " .. tostring(finalTargetPos))
-    print("[下降] 当前玩家位置: " .. tostring(humanoidRootPart.Position))
-    print(string.format("[下降] 垂直距离: %.2f米", currentY - targetHeight))
 
     -- 禁用飞行平台站立
     humanoid.PlatformStand = false
@@ -2115,7 +2299,6 @@ local function descendToCollectHeight(target, isAura)
     
     -- 确保目标位置有效
     if finalTargetPos ~= Vector3.new(0, 0, 0) then
-        print("[下降] 创建Tween动画，持续时间: " .. CONFIG.HEIGHT_TWEEN_TIME .. "秒")
         tween = TweenService:Create(
             humanoidRootPart,
             TweenInfo.new(CONFIG.HEIGHT_TWEEN_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
@@ -2124,11 +2307,9 @@ local function descendToCollectHeight(target, isAura)
         
         tween.Completed:Connect(function()
             tweenCompleted = true
-            print("[下降] Tween动画完成，最终位置: " .. tostring(humanoidRootPart.Position))
         end)
         
         tween:Play()
-        print("[下降] Tween动画已开始")
     else
         warn("[下降] 目标位置无效，跳过Tween动画")
         -- 直接设置位置
@@ -2139,17 +2320,8 @@ local function descendToCollectHeight(target, isAura)
     -- 等待下降完成
     local waitStart = tick()
     local maxWaitTime = CONFIG.HEIGHT_TWEEN_TIME * 3  -- 最多等待3倍的动画时间
-    local waitCount = 0
     
     while not tweenCompleted and tick() - waitStart < maxWaitTime do
-        local progress = (tick() - waitStart) / CONFIG.HEIGHT_TWEEN_TIME
-        local currentPos = humanoidRootPart.Position
-        waitCount = waitCount + 1
-        
-        if waitCount % 5 == 0 then  -- 每5次检查打印一次进度
-            print(string.format("[下降] 进度: %.1f%% 当前位置: (%.2f, %.2f, %.2f)", 
-                math.min(progress * 100, 100), currentPos.X, currentPos.Y, currentPos.Z))
-        end
         task.wait(0.1)
     end
     
@@ -2441,14 +2613,14 @@ local function mainLoop()
             print("[主流程] 寻找目标时发生错误，5秒后重试")
             warn("[主流程] 错误详情: " .. tostring(bestTarget))
             
-            disableFlight()
+            StopAllMovement()
             task.wait(5)
             continue
         end
         
         if not bestTarget then
             print("[主流程] 未找到任何目标，5秒后重试")
-            disableFlight()
+            StopAllMovement()
             
             for i = 1, 50 do
                 if not HerbState.isRunning then
@@ -2503,7 +2675,7 @@ local function mainLoop()
         local reachSuccess = flyToTarget(bestTarget, isAura)
         
         if not HerbState.isRunning then
-            disableFlight()
+            StopAllMovement()
             break
         end
         
@@ -2543,7 +2715,7 @@ local function mainLoop()
         print("[主流程] 飞行到达成功，准备下降...")
         
         if not HerbState.isRunning then
-            disableFlight()
+            StopAllMovement()
             break
         end
         
@@ -2580,7 +2752,7 @@ local function mainLoop()
         end
 
         if not HerbState.isRunning then
-            disableFlight()
+            StopAllMovement()
             break
         end
         
@@ -2638,7 +2810,7 @@ local function mainLoop()
         end
     end
 
-    disableFlight()
+    StopAllMovement()
     HerbState.currentHerb = nil
     AuraState.currentAura = nil
     HerbState.retryAttempts = 0
@@ -2688,6 +2860,11 @@ local function startHerbSystem()
         setupQuickPickListener()
     end
     
+    -- 启动手机端优化
+    if HerbState.mobilePerformanceMode then
+        startMobileOptimization()
+    end
+    
     -- 使用task.spawn替代coroutine，更稳定
     task.spawn(function()
         mainLoop()
@@ -2711,6 +2888,9 @@ local function stopHerbSystem()
     StopAllMovement()
     HerbState.currentHerb = nil
     AuraState.currentAura = nil
+    
+    -- 停止手机端优化
+    stopMobileOptimization()
     
     print("[系统] 系统已停止")
     return true
@@ -3729,7 +3909,7 @@ local function createPillUI()
     return screenGui
 end
 
--- ===================== 创建主UI（已移除新功能标签，功能并入草药系统） =====================
+-- ===================== 创建主UI =====================
 local MainUI = nil
 local CurrentTab = "herb" -- 当前选中的标签
 local UIUpdateConnection = nil
@@ -3872,7 +4052,7 @@ local function createMainUI()
     pillContentFrame.BackgroundTransparency = 1
     pillContentFrame.Visible = false
     
-    -- ===================== 草药内容（已包含新功能） =====================
+    -- ===================== 草药内容 =====================
     local herbStatusLabel = Instance.new("TextLabel")
     herbStatusLabel.Name = "HerbStatusLabel"
     herbStatusLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 25)
@@ -3906,10 +4086,22 @@ local function createMainUI()
     herbPriorityLabel.TextSize = UI.SMALL_TEXT_SIZE
     herbPriorityLabel.TextXAlignment = Enum.TextXAlignment.Left
     
+    -- 新增：手机优化状态显示
+    local herbMobileStatusLabel = Instance.new("TextLabel")
+    herbMobileStatusLabel.Name = "HerbMobileStatusLabel"
+    herbMobileStatusLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 20)
+    herbMobileStatusLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 0, 90)
+    herbMobileStatusLabel.BackgroundTransparency = 1
+    herbMobileStatusLabel.Text = HerbState.mobilePerformanceMode and "手机模式: 优化中" or "手机模式: 未启用"
+    herbMobileStatusLabel.TextColor3 = HerbState.mobilePerformanceMode and Color3.fromRGB(100, 200, 255) or Color3.fromRGB(200, 200, 200)
+    herbMobileStatusLabel.Font = Enum.Font.SourceSans
+    herbMobileStatusLabel.TextSize = UI.SMALL_TEXT_SIZE
+    herbMobileStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    
     local herbPriorityButton = Instance.new("TextButton")
     herbPriorityButton.Name = "HerbPriorityButton"
     herbPriorityButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbPriorityButton.Position = UDim2.new(0.025, 0, 0, 90)
+    herbPriorityButton.Position = UDim2.new(0.025, 0, 0, 115)
     herbPriorityButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
     herbPriorityButton.Text = "设置优先级"
     herbPriorityButton.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -3920,7 +4112,7 @@ local function createMainUI()
     local herbToggleButton = Instance.new("TextButton")
     herbToggleButton.Name = "HerbToggleButton"
     herbToggleButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbToggleButton.Position = UDim2.new(0.525, 0, 0, 90)
+    herbToggleButton.Position = UDim2.new(0.525, 0, 0, 115)
     herbToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
     herbToggleButton.Text = "启动系统"
     herbToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -3931,7 +4123,7 @@ local function createMainUI()
     local herbResetButton = Instance.new("TextButton")
     herbResetButton.Name = "HerbResetButton"
     herbResetButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbResetButton.Position = UDim2.new(0.025, 0, 0, 135)
+    herbResetButton.Position = UDim2.new(0.025, 0, 0, 160)
     herbResetButton.BackgroundColor3 = Color3.fromRGB(150, 150, 50)
     herbResetButton.Text = "重置状态"
     herbResetButton.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -3943,7 +4135,7 @@ local function createMainUI()
     local herbQuickPickButton = Instance.new("TextButton")
     herbQuickPickButton.Name = "HerbQuickPickButton"
     herbQuickPickButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbQuickPickButton.Position = UDim2.new(0.525, 0, 0, 135)
+    herbQuickPickButton.Position = UDim2.new(0.525, 0, 0, 160)
     herbQuickPickButton.BackgroundColor3 = Color3.fromRGB(70, 70, 150)
     herbQuickPickButton.Text = "一键加速"
     herbQuickPickButton.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -3955,7 +4147,7 @@ local function createMainUI()
     local herbAutoHarvestButton = Instance.new("TextButton")
     herbAutoHarvestButton.Name = "HerbAutoHarvestButton"
     herbAutoHarvestButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbAutoHarvestButton.Position = UDim2.new(0.025, 0, 0, 180)
+    herbAutoHarvestButton.Position = UDim2.new(0.025, 0, 0, 205)
     herbAutoHarvestButton.BackgroundColor3 = Color3.fromRGB(150, 70, 70)
     herbAutoHarvestButton.Text = "自动采摘"
     herbAutoHarvestButton.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -3963,11 +4155,11 @@ local function createMainUI()
     herbAutoHarvestButton.TextSize = UI.BUTTON_TEXT_SIZE
     herbAutoHarvestButton.BorderSizePixel = 0
     
-    -- 新增：功法自动收集按钮（已移到草药系统）
+    -- 新增：功法自动收集按钮
     local herbAuraAutoCollectButton = Instance.new("TextButton")
     herbAuraAutoCollectButton.Name = "HerbAuraAutoCollectButton"
     herbAuraAutoCollectButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbAuraAutoCollectButton.Position = UDim2.new(0.525, 0, 0, 180)
+    herbAuraAutoCollectButton.Position = UDim2.new(0.525, 0, 0, 205)
     herbAuraAutoCollectButton.BackgroundColor3 = Color3.fromRGB(150, 100, 70)
     herbAuraAutoCollectButton.Text = "功法自动收集"
     herbAuraAutoCollectButton.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -3979,7 +4171,7 @@ local function createMainUI()
     local herbCollisionButton = Instance.new("TextButton")
     herbCollisionButton.Name = "HerbCollisionButton"
     herbCollisionButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
-    herbCollisionButton.Position = UDim2.new(0.025, 0, 0, 225)
+    herbCollisionButton.Position = UDim2.new(0.025, 0, 0, 250)
     herbCollisionButton.BackgroundColor3 = Color3.fromRGB(120, 70, 150)
     herbCollisionButton.Text = "禁用地图碰撞"
     herbCollisionButton.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -3987,12 +4179,24 @@ local function createMainUI()
     herbCollisionButton.TextSize = UI.BUTTON_TEXT_SIZE
     herbCollisionButton.BorderSizePixel = 0
     
+    -- 新增：清理缓存按钮
+    local herbCleanCacheButton = Instance.new("TextButton")
+    herbCleanCacheButton.Name = "HerbCleanCacheButton"
+    herbCleanCacheButton.Size = UDim2.new(0.45, 0, 0, UI.BUTTON_HEIGHT)
+    herbCleanCacheButton.Position = UDim2.new(0.525, 0, 0, 250)
+    herbCleanCacheButton.BackgroundColor3 = Color3.fromRGB(70, 150, 150)
+    herbCleanCacheButton.Text = "清理缓存"
+    herbCleanCacheButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    herbCleanCacheButton.Font = Enum.Font.SourceSansBold
+    herbCleanCacheButton.TextSize = UI.BUTTON_TEXT_SIZE
+    herbCleanCacheButton.BorderSizePixel = 0
+    
     local herbInfoLabel = Instance.new("TextLabel")
     herbInfoLabel.Name = "HerbInfoLabel"
-    herbInfoLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 100)
-    herbInfoLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 1, -110)
+    herbInfoLabel.Size = UDim2.new(1, -UI.PADDING_MEDIUM*2, 0, 80)
+    herbInfoLabel.Position = UDim2.new(0, UI.PADDING_MEDIUM, 1, -90)
     herbInfoLabel.BackgroundTransparency = 1
-    herbInfoLabel.Text = "提示: 自动寻找并采集草药\n支持优先级草药设置\n一键加速: 开启后秒采草药\n自动采摘: 靠近草药自动采集\n功法自动收集: 自动收集附近的功法\n禁用地图碰撞: 关闭Map文件夹中所有部件的碰撞"
+    herbInfoLabel.Text = "提示: 自动寻找并采集草药\n支持优先级草药设置\n一键加速: 开启后秒采草药\n自动采摘: 靠近草药自动采集\n功法自动收集: 自动收集附近的功法\n禁用地图碰撞: 关闭Map文件夹中所有部件的碰撞\n清理缓存: 清理无效缓存，解决长时间运行问题"
     herbInfoLabel.TextColor3 = Color3.fromRGB(180, 180, 255)
     herbInfoLabel.Font = Enum.Font.SourceSans
     herbInfoLabel.TextSize = UI.SMALL_TEXT_SIZE
@@ -4342,6 +4546,27 @@ local function createMainUI()
         end
     end)
     
+    -- 清理缓存按钮事件
+    herbCleanCacheButton.MouseButton1Click:Connect(function()
+        print("[UI] 开始清理缓存...")
+        local cleaned = cleanInvalidCache()
+        if cleaned > 0 then
+            herbCleanCacheButton.Text = "清理完成"
+            herbCleanCacheButton.BackgroundColor3 = Color3.fromRGB(0, 180, 0)
+        else
+            herbCleanCacheButton.Text = "无需清理"
+            herbCleanCacheButton.BackgroundColor3 = Color3.fromRGB(180, 180, 0)
+        end
+        
+        -- 3秒后恢复按钮文本
+        task.delay(3, function()
+            if herbCleanCacheButton then
+                herbCleanCacheButton.Text = "清理缓存"
+                herbCleanCacheButton.BackgroundColor3 = Color3.fromRGB(70, 150, 150)
+            end
+        end)
+    end)
+    
     -- 功法按钮事件
     auraModeButton.MouseButton1Click:Connect(function()
         -- 切换目标模式
@@ -4470,6 +4695,7 @@ local function createMainUI()
     herbStatusLabel.Parent = herbContentFrame
     herbTargetLabel.Parent = herbContentFrame
     herbPriorityLabel.Parent = herbContentFrame
+    herbMobileStatusLabel.Parent = herbContentFrame
     herbPriorityButton.Parent = herbContentFrame
     herbToggleButton.Parent = herbContentFrame
     herbResetButton.Parent = herbContentFrame
@@ -4477,6 +4703,7 @@ local function createMainUI()
     herbAutoHarvestButton.Parent = herbContentFrame
     herbAuraAutoCollectButton.Parent = herbContentFrame
     herbCollisionButton.Parent = herbContentFrame
+    herbCleanCacheButton.Parent = herbContentFrame
     herbInfoLabel.Parent = herbContentFrame
     
     auraStatusLabel.Parent = auraContentFrame
@@ -4570,6 +4797,21 @@ local function createMainUI()
                 else
                     herbPriorityLabel.Text = "优先级草药: 无 (采集所有草药)"
                     herbPriorityLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+                end
+            end
+            
+            if herbMobileStatusLabel then
+                if HerbState.mobilePerformanceMode then
+                    if HerbState.lowMemoryMode then
+                        herbMobileStatusLabel.Text = string.format("手机模式: 低内存 (缓存: %d)", HerbState.cacheSize or 0)
+                        herbMobileStatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                    else
+                        herbMobileStatusLabel.Text = string.format("手机模式: 优化中 (缓存: %d)", HerbState.cacheSize or 0)
+                        herbMobileStatusLabel.TextColor3 = Color3.fromRGB(100, 200, 255)
+                    end
+                else
+                    herbMobileStatusLabel.Text = "手机模式: 未启用"
+                    herbMobileStatusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
                 end
             end
             
@@ -4683,7 +4925,7 @@ end
 
 -- ===================== 主初始化 =====================
 print("=== 多功能采集系统 ===")
-print("版本: 完整功能修复版 + 地图碰撞禁用修复 + 基于原始代码的防AFK")
+print("版本: 完整功能修复版 + 地图碰撞禁用修复 + 基于原始代码的防AFK + 手机端优化")
 print("主要功能:")
 print("1. 草药系统: 优先级草药选择 + 一键加速 + 自动采摘 + 功法自动收集")
 print("2. 功法系统: 修复下降问题，优化搜索")
@@ -4691,6 +4933,7 @@ print("3. 修炼系统: 自动突破 (间隔: " .. CONFIG.BREAKTHROUGH_INTERVAL 
 print("4. 炼药系统: 独立设置界面 (支持 " .. #CONFIG.PILL_TYPES .. " 种丹药)")
 print("5. 修复: 地图碰撞禁用 - 解决碰撞恢复问题")
 print("6. 基于原始代码的防AFK系统 (55秒间隔)")
+print("7. 手机端优化: 解决长时间运行搜索不到草药问题")
 
 -- 启动防AFK系统 - 先等待游戏完全加载
 task.wait(3) -- 等待3秒让游戏完全加载
