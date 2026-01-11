@@ -2658,9 +2658,18 @@ local function enhancedCleanup()
         print("[清理] 清理无效的功法目标")
     end
     
+    -- 计算表的大小（修复：替换错误的table.count调用）
+    local function getTableSize(t)
+        local count = 0
+        for _ in pairs(t) do
+            count = count + 1
+        end
+        return count
+    end
+    
     print(string.format("[清理] 完成: 已采集 %d, 超时 %d, 修改 %d, 当前记录: 已采集 %d, 超时 %d, 修改 %d",
         cleanedCollected, cleanedTimeout, cleanedModified,
-        table.count(newCollectedHerbs), table.count(newTimeoutHerbs), table.count(newModifiedHerbs)))
+        getTableSize(newCollectedHerbs), getTableSize(newTimeoutHerbs), getTableSize(newModifiedHerbs)))
     
     return cleanedCollected + cleanedTimeout + cleanedModified
 end
@@ -5407,42 +5416,6 @@ task.spawn(function()
             if anyCollisionEnabled and restoredCount > 0 then
                 print("[碰撞检查] 检测到 " .. restoredCount .. " 个对象碰撞被恢复，已重新禁用")
             end
-        end
-    end
-end)
-
--- ===================== 定期清理和重置机制 =====================
--- 每30分钟强制清理一次状态，防止长时间运行导致的问题
-task.spawn(function()
-    while true do
-        task.wait(1800) -- 30分钟
-        
-        if not AntiAFKState.isRunning then
-            print("[系统检查] 防AFK系统停止，正在重新启动...")
-            setupAntiAFK()
-        end
-        
-        -- 打印防AFK状态
-        local currentTime = tick()
-        local timeSinceSignal = currentTime - AntiAFKState.LastSignalTime
-        
-        if timeSinceSignal > 90 then
-            print("[系统检查] 警告: 已 " .. math.floor(timeSinceSignal) .. " 秒无活动信号")
-        end
-
-        if HerbState.isRunning then
-            print("[定期清理] 执行定期状态清理...")
-            
-            -- 执行增强清理
-            enhancedCleanup()
-            
-            -- 如果当前目标为空或无效，强制重新寻找
-            if HerbState.currentHerb and (not HerbState.currentHerb.Parent or not HerbState.currentHerb:IsDescendantOf(Workspace)) then
-                print("[定期清理] 当前目标无效，强制重新寻找")
-                HerbState.currentHerb = nil
-            end
-            
-            print("[定期清理] 完成状态清理")
         end
     end
 end)
