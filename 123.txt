@@ -105,7 +105,8 @@ local HerbState = {
     autoHarvestConnection = nil,  -- 自动采摘连接
     modifiedHerbs = {},  -- 已修改采摘时间的草药记录
     herbsFolderListener = nil,  -- 草药文件夹监听器
-    quickPickConnection = nil  -- 一键加速连接器
+    quickPickConnection = nil,  -- 一键加速连接器
+    lastTargetTime = 0  -- 上次找到目标的时间
 }
 
 local AuraAutoCollectState = {
@@ -1510,100 +1511,232 @@ local function getHerbPriority(herbName)
     return nil
 end
 
+-- ===================== 修复：增强的草药扫描函数 =====================
 local function scanHerbs()
     local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
     if not herbsFolder then 
         warn("[扫描] 未找到草药文件夹：" .. CONFIG.HERBS_FOLDER_NAME)
         
-        -- 尝试其他名称
-        for _, child in ipairs(Workspace:GetChildren()) do
-            if child.Name:match("Herb") or child.Name:match("草药") then
-                herbsFolder = child
+        -- 尝试查找其他可能的草药文件夹
+        local alternativeFolders = {"Herb", "Herbs", "草药", "草药采集", "植物", "Plants"}
+        for _, folderName in ipairs(alternativeFolders) do
+            local folder = Workspace:FindFirstChild(folderName)
+            if folder and (folder:IsA("Folder") or folder:IsA("Model")) then
+                herbsFolder = folder
+                print("[扫描] 找到替代草药文件夹：" .. folderName)
                 break
             end
         end
         
         if not herbsFolder then
-            return {} 
-        else
-            print("[扫描] 找到替代草药文件夹：" .. herbsFolder.Name)
+            print("[扫描] 警告：完全找不到草药文件夹，尝试遍历Workspace")
+            
+            -- 遍历Workspace直接查找草药对象
+            local allHerbs = {}
+            for _, child in ipairs(Workspace:GetChildren()) do
+                if child and child.Parent then
+                    -- 检查是否是草药对象（根据常见特征）
+                    local isHerb = false
+                    
+                    -- 检查名称中是否包含草药关键词
+                    local herbKeywords = {"Herb", "Growth", "Plant", "草药", "草", "药"}
+                    for _, keyword in ipairs(herbKeywords) do
+                        if child.Name:find(keyword) then
+                            isHerb = true
+                            break
+                        end
+                    end
+                    
+                    -- 检查是否有ProximityPrompt（可交互）
+                    local function hasProximityPrompt(obj)
+                        for _, descendant in ipairs(obj:GetDescendants()) do
+                            if descendant:IsA("ProximityPrompt") then
+                                return true
+                            end
+                        end
+                        return false
+                    end
+                    
+                    if not isHerb then
+                        isHerb = hasProximityPrompt(child)
+                    end
+                    
+                    -- 检查是否是可见的3D对象
+                    if isHerb and (child:IsA("Model") or child:IsA("BasePart") or child:IsA("MeshPart")) then
+                        -- 检查黑名单
+                        local isBlacklisted = false
+                        for _, blacklistName in ipairs(CONFIG.BLACKLIST_HERBS) do
+                            if child.Name == blacklistName or child.Name:match(blacklistName) then
+                                isBlacklisted = true
+                                print(string.format("[扫描] 跳过黑名单草药: %s", child.Name))
+                                break
+                            end
+                        end
+                        
+                        if not isBlacklisted then
+                            table.insert(allHerbs, child)
+                        end
+                    end
+                end
+            end
+            
+            print("[扫描] 通过遍历找到草药数量：" .. #allHerbs)
+            return allHerbs
         end
     end
 
     local validHerbs = {}
     local currentTime = tick()
     
-    -- 清理过期的超时记录
-    for herb, timeoutTime in pairs(HerbState.timeoutHerbs) do
-        if currentTime - timeoutTime > CONFIG.TIMEOUT_COOLDOWN then
-            HerbState.timeoutHerbs[herb] = nil
+    -- 定期清理过期的记录（每5分钟清理一次）
+    if currentTime % 300 < 0.5 then  -- 每5分钟清理一次
+        print("[扫描] 执行定期状态清理...")
+        
+        -- 清理已采集记录
+        local newCollectedHerbs = {}
+        for herb, collectedTime in pairs(HerbState.collectedHerbs) do
+            if herb and herb.Parent and (currentTime - collectedTime) < 600 then  -- 只保留10分钟内的记录
+                newCollectedHerbs[herb] = collectedTime
+            end
         end
+        HerbState.collectedHerbs = newCollectedHerbs
+        
+        -- 清理超时记录
+        local newTimeoutHerbs = {}
+        for herb, timeoutTime in pairs(HerbState.timeoutHerbs) do
+            if herb and herb.Parent and (currentTime - timeoutTime) < CONFIG.TIMEOUT_COOLDOWN then
+                newTimeoutHerbs[herb] = timeoutTime
+            end
+        end
+        HerbState.timeoutHerbs = newTimeoutHerbs
+        
+        -- 清理年龄缓存
+        HerbState.herbAgeCache = {}
+        
+        print(string.format("[扫描] 清理完成: 已采集 %d, 超时 %d", 
+            table.count(newCollectedHerbs), table.count(newTimeoutHerbs)))
     end
     
     -- 扫描所有草药对象
-    for _, item in ipairs(herbsFolder:GetChildren()) do
-        if not item or not item.Parent then
-            continue
-        end
-        
-        -- 检查是否是黑名单草药
-        local isBlacklisted = false
-        for _, blacklistName in ipairs(CONFIG.BLACKLIST_HERBS) do
-            if item.Name == blacklistName or item.Name:match(blacklistName) then
-                isBlacklisted = true
-                print(string.format("[扫描] 跳过黑名单草药: %s", item.Name))
-                break
+    local scanCount = 0
+    local skipCount = 0
+    
+    -- 递归扫描子对象
+    local function scanFolderContents(folder)
+        for _, item in ipairs(folder:GetChildren()) do
+            if not item or not item.Parent then
+                continue
             end
-        end
-        
-        if isBlacklisted then
-            continue
-        end
-        
-        -- 如果开启了一键加速，修改采摘时间
-        if HerbState.quickPickEnabled then
-            modifySingleHerbPickTime(item)
-        end
-        
-        -- 检查是否已采集
-        local isCollected = false
-        for collectedHerb, _ in pairs(HerbState.collectedHerbs) do
-            if collectedHerb and collectedHerb == item then
-                isCollected = true
-                break
-            end
-        end
-        
-        -- 检查是否超时
-        local isTimedOut = false
-        for timeoutHerb, timeoutTime in pairs(HerbState.timeoutHerbs) do
-            if timeoutHerb and timeoutHerb == item then
-                if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
-                    isTimedOut = true
+            
+            scanCount = scanCount + 1
+            
+            -- 检查是否是黑名单草药
+            local isBlacklisted = false
+            for _, blacklistName in ipairs(CONFIG.BLACKLIST_HERBS) do
+                if item.Name == blacklistName or item.Name:match(blacklistName) then
+                    isBlacklisted = true
+                    skipCount = skipCount + 1
+                    break
                 end
-                break
             end
-        end
-        
-        local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == item)
-        
-        -- 支持多种类型的草药对象
-        local isValidType = item:IsA("MeshPart") or item:IsA("Part") or item:IsA("Model")
-        
-        if isValidType and not isCollected and not isTimedOut and (not isCurrentTarget or not item.Parent) then
-            -- 如果是Model，检查其中是否有可交互的部分
+            
+            if isBlacklisted then
+                continue
+            end
+            
+            -- 检查是否已采集（使用更宽松的检查）
+            local isCollected = false
+            for collectedHerb, collectedTime in pairs(HerbState.collectedHerbs) do
+                if collectedHerb and collectedHerb == item and (currentTime - collectedTime) < 600 then
+                    isCollected = true
+                    skipCount = skipCount + 1
+                    break
+                end
+            end
+            
+            -- 检查是否超时
+            local isTimedOut = false
+            for timeoutHerb, timeoutTime in pairs(HerbState.timeoutHerbs) do
+                if timeoutHerb and timeoutHerb == item and (currentTime - timeoutTime) < CONFIG.TIMEOUT_COOLDOWN then
+                    isTimedOut = true
+                    skipCount = skipCount + 1
+                    break
+                end
+            end
+            
+            local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == item)
+            
+            -- 扩展支持的对象类型
+            local isValidType = item:IsA("MeshPart") or item:IsA("Part") or item:IsA("Model") 
+                              or item:IsA("UnionOperation") or item:IsA("WedgePart")
+            
+            -- 对于Model，检查是否有可见的子对象
             if item:IsA("Model") then
-                -- 检查Model是否有PrimaryPart或者任何MeshPart/Part
-                if item.PrimaryPart or #item:GetChildren() > 0 then
-                    table.insert(validHerbs, item)
+                -- 检查是否有PrimaryPart或任何BasePart子对象
+                local hasParts = false
+                if item.PrimaryPart then
+                    hasParts = true
+                else
+                    for _, child in ipairs(item:GetChildren()) do
+                        if child:IsA("BasePart") then
+                            hasParts = true
+                            break
+                        end
+                    end
+                end
+                
+                -- 检查是否有ProximityPrompt（可交互性）
+                local hasPrompt = false
+                for _, child in ipairs(item:GetDescendants()) do
+                    if child:IsA("ProximityPrompt") then
+                        hasPrompt = true
+                        break
+                    end
+                end
+                
+                -- 如果没有子部件或不可交互，跳过
+                if not hasParts and not hasPrompt then
+                    skipCount = skipCount + 1
+                    continue
+                end
+            end
+            
+            if isValidType and not isCollected and not isTimedOut and (not isCurrentTarget or not item.Parent) then
+                table.insert(validHerbs, item)
+                
+                -- 如果开启了一键加速，修改采摘时间
+                if HerbState.quickPickEnabled then
+                    modifySingleHerbPickTime(item)
                 end
             else
-                table.insert(validHerbs, item)
+                skipCount = skipCount + 1
+            end
+            
+            -- 递归扫描子文件夹
+            if item:IsA("Folder") or item:IsA("Model") then
+                scanFolderContents(item)
             end
         end
     end
     
-    print(string.format("[扫描] 找到有效草药数量：%d", #validHerbs))
+    scanFolderContents(herbsFolder)
+    
+    -- 打印扫描统计信息
+    if scanCount > 0 then
+        print(string.format("[扫描] 统计: 扫描 %d 个对象，有效草药 %d 个，跳过 %d 个", 
+            scanCount, #validHerbs, skipCount))
+        
+        -- 如果跳过太多，考虑重置状态
+        if skipCount > 50 and #validHerbs == 0 then
+            print("[扫描] 警告：跳过太多对象且没有有效草药，考虑重置状态")
+            task.spawn(function()
+                resetScanState()
+                print("[扫描] 已执行重置扫描状态")
+            end)
+        end
+    else
+        print("[扫描] 警告：没有扫描到任何对象")
+    end
     
     return validHerbs
 end
@@ -1641,7 +1774,57 @@ local function filterHerbsByPriority(herbs)
     return formattedPriorityHerbs, nonPriorityHerbs, true
 end
 
+-- ===================== 修复：优化寻找最佳目标的逻辑 =====================
 local function findBestTarget()
+    -- 先检查当前目标是否仍然有效
+    if HerbState.currentHerb and HerbState.currentHerb.Parent then
+        -- 检查当前目标是否已采集或超时
+        local isStillValid = true
+        
+        -- 检查是否已采集
+        for collectedHerb, collectedTime in pairs(HerbState.collectedHerbs) do
+            if collectedHerb == HerbState.currentHerb then
+                isStillValid = false
+                break
+            end
+        end
+        
+        -- 检查是否超时
+        for timeoutHerb, timeoutTime in pairs(HerbState.timeoutHerbs) do
+            if timeoutHerb == HerbState.currentHerb and (tick() - timeoutTime) < CONFIG.TIMEOUT_COOLDOWN then
+                isStillValid = false
+                break
+            end
+        end
+        
+        if isStillValid then
+            print("[寻找] 当前目标仍然有效: " .. HerbState.currentHerb.Name)
+            
+            -- 如果是功法，优先处理功法
+            if HerbState.targetMode == "aura" or HerbState.targetMode == "both" then
+                -- 检查是否是功法
+                local function isAura(obj)
+                    for _, child in ipairs(obj:GetDescendants()) do
+                        if child:IsA("ProximityPrompt") then
+                            return true
+                        end
+                    end
+                    return false
+                end
+                
+                if isAura(HerbState.currentHerb) then
+                    print("[寻找] 当前目标是功法，优先处理")
+                    return HerbState.currentHerb, true
+                end
+            end
+            
+            return HerbState.currentHerb, false
+        else
+            print("[寻找] 当前目标已失效，重新寻找")
+            HerbState.currentHerb = nil
+        end
+    end
+    
     -- 根据目标模式决定寻找目标
     if HerbState.targetMode == "aura" or HerbState.targetMode == "both" then
         -- 优先查找功法
@@ -1657,7 +1840,7 @@ local function findBestTarget()
             for _, aura in ipairs(allAuras) do
                 if aura and aura.Parent then
                     local auraPos = getAuraPosition(aura)
-                    if auraPos and auraPos ~= Vector3.new(0, 0, 0) then  -- 确保获取到了有效位置
+                    if auraPos and auraPos ~= Vector3.new(0, 0, 0) then
                         local distance = (auraPos - playerPos).Magnitude
                         
                         if distance < closestDistance then
@@ -1672,7 +1855,7 @@ local function findBestTarget()
                 AuraState.currentAura = closestAura
                 HerbState.currentHerb = nil
                 print(string.format("[寻找] 选择功法: %s (距离: %.1f米)", closestAura.Name, closestDistance))
-                return closestAura, true -- 第二个参数true表示这是功法
+                return closestAura, true
             else
                 print("[寻找] 虽然扫描到功法，但所有功法都无法访问")
             end
@@ -1685,23 +1868,44 @@ local function findBestTarget()
     if HerbState.targetMode == "herb" or HerbState.targetMode == "both" then
         AuraState.currentAura = nil
         local allHerbs = scanHerbs()
+        
         if #allHerbs == 0 then 
             print("[寻找] 未找到任何有效草药")
             HerbState.failCount = HerbState.failCount + 1
             
+            -- 增加失败时的调试信息
             if HerbState.failCount >= 3 then
-                print("[寻找] 连续3次未找到目标，重置扫描状态")
+                print("[寻找] 连续3次未找到目标，执行深度清理")
+                
+                -- 执行更彻底的清理
                 HerbState.collectedHerbs = {}
                 HerbState.timeoutHerbs = {}
                 HerbState.herbAgeCache = {}
+                HerbState.modifiedHerbs = {}
                 HerbState.failCount = 0
                 
+                -- 等待一会后重新扫描
+                task.wait(2)
                 allHerbs = scanHerbs()
+                
                 if #allHerbs == 0 then
-                    print("[寻找] 重置后仍未找到目标")
-                    return nil, false
+                    print("[寻找] 深度清理后仍未找到目标，检查游戏状态")
+                    
+                    -- 检查游戏服务状态
+                    local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
+                    if not herbsFolder then
+                        print("[寻找] 错误：草药文件夹不存在，可能游戏状态异常")
+                    else
+                        print(string.format("[寻找] 草药文件夹存在，子对象数量: %d", #herbsFolder:GetChildren()))
+                    end
+                    
+                    -- 尝试更宽松的扫描
+                    print("[寻找] 尝试放宽扫描条件...")
+                    allHerbs = scanHerbs()
                 end
-            else
+            end
+            
+            if #allHerbs == 0 then
                 return nil, false
             end
         else
@@ -1710,11 +1914,13 @@ local function findBestTarget()
 
         local priorityHerbs, nonPriorityHerbs, hasPriority = filterHerbsByPriority(allHerbs)
         
-        -- 如果有优先级草药，按年份从大到小排序，年份相同按距离从小到大排序
+        -- 如果有优先级草药
         if hasPriority and #priorityHerbs > 0 then
             print(string.format("[优先级] 用户选择了 %d 种优先级草药", #HerbState.priorityHerbs))
             
             local allPriorityHerbs = {}
+            local playerPos = humanoidRootPart and humanoidRootPart.Position or Vector3.new(0, 0, 0)
+            
             for _, priorityInfo in ipairs(priorityHerbs) do
                 local herb = priorityInfo.herb
                 local priority = priorityInfo.priority
@@ -1722,7 +1928,7 @@ local function findBestTarget()
                 if herb and herb.Parent then
                     local age = getHerbAge(herb)
                     local herbPos = getHerbPosition(herb)
-                    local distance = (herbPos - humanoidRootPart.Position).Magnitude
+                    local distance = (herbPos - playerPos).Magnitude
                     
                     table.insert(allPriorityHerbs, {
                         herb = herb,
@@ -1750,15 +1956,10 @@ local function findBestTarget()
                     bestHerb.Name, bestAge, bestDistance))
                 
                 return bestHerb, false
-            else
-                print("[优先级] 没有找到有效的优先级草药，将在所有草药中寻找")
-                hasPriority = false
             end
-        else
-            print("[优先级] 未选择优先级草药，将选择年份最大的草药")
         end
         
-        -- 如果没有优先级草药或优先级草药都无效，则从所有草药中选择年份最大的
+        -- 从所有草药中选择年份最大的
         local herbsToCheck = nonPriorityHerbs
         if not hasPriority then
             herbsToCheck = allHerbs
@@ -2401,8 +2602,80 @@ local function resetScanState()
     print("[重置] 扫描状态已重置")
 end
 
+-- ===================== 修复：增强的定期状态清理 =====================
+local function enhancedCleanup()
+    print("[清理] 执行增强的状态清理...")
+    local currentTime = tick()
+    
+    -- 1. 清理已采集记录（超过15分钟的记录）
+    local cleanedCollected = 0
+    local newCollectedHerbs = {}
+    for herb, collectedTime in pairs(HerbState.collectedHerbs) do
+        if herb and herb.Parent and (currentTime - collectedTime) < 900 then  -- 15分钟
+            newCollectedHerbs[herb] = collectedTime
+        else
+            cleanedCollected = cleanedCollected + 1
+        end
+    end
+    HerbState.collectedHerbs = newCollectedHerbs
+    
+    -- 2. 清理超时记录
+    local cleanedTimeout = 0
+    local newTimeoutHerbs = {}
+    for herb, timeoutTime in pairs(HerbState.timeoutHerbs) do
+        if herb and herb.Parent and (currentTime - timeoutTime) < CONFIG.TIMEOUT_COOLDOWN then
+            newTimeoutHerbs[herb] = timeoutTime
+        else
+            cleanedTimeout = cleanedTimeout + 1
+        end
+    end
+    HerbState.timeoutHerbs = newTimeoutHerbs
+    
+    -- 3. 清理年龄缓存
+    HerbState.herbAgeCache = {}
+    
+    -- 4. 清理修改记录
+    local cleanedModified = 0
+    local newModifiedHerbs = {}
+    for herb, modifiedTime in pairs(HerbState.modifiedHerbs) do
+        if herb and herb.Parent then
+            newModifiedHerbs[herb] = modifiedTime
+        else
+            cleanedModified = cleanedModified + 1
+        end
+    end
+    HerbState.modifiedHerbs = newModifiedHerbs
+    
+    -- 5. 重置当前目标如果无效
+    if HerbState.currentHerb and (not HerbState.currentHerb.Parent or not HerbState.currentHerb:IsDescendantOf(Workspace)) then
+        HerbState.currentHerb = nil
+        print("[清理] 清理无效的当前目标")
+    end
+    
+    -- 6. 重置功法目标如果无效
+    if AuraState.currentAura and (not AuraState.currentAura.Parent or not AuraState.currentAura:IsDescendantOf(Workspace)) then
+        AuraState.currentAura = nil
+        print("[清理] 清理无效的功法目标")
+    end
+    
+    print(string.format("[清理] 完成: 已采集 %d, 超时 %d, 修改 %d, 当前记录: 已采集 %d, 超时 %d, 修改 %d",
+        cleanedCollected, cleanedTimeout, cleanedModified,
+        table.count(newCollectedHerbs), table.count(newTimeoutHerbs), table.count(newModifiedHerbs)))
+    
+    return cleanedCollected + cleanedTimeout + cleanedModified
+end
+
+-- ===================== 修复：主循环中的改进 =====================
 local function mainLoop()
     print("[主流程] 启动，开始寻找目标...")
+    
+    -- 初始化清理计时器
+    local lastCleanupTime = tick()
+    local cleanupInterval = 300  -- 5分钟清理一次
+    
+    -- 初始化防AFK干扰计数器
+    local consecutiveFails = 0
+    local maxConsecutiveFails = 10
     
     if #HerbState.priorityHerbs > 0 then
         print("[主流程] 优先级草药设置:")
@@ -2424,13 +2697,25 @@ local function mainLoop()
             break
         end
         
+        -- 定期执行状态清理
+        local currentTime = tick()
+        if currentTime - lastCleanupTime > cleanupInterval then
+            enhancedCleanup()
+            lastCleanupTime = currentTime
+        end
+        
         HerbState.currentHerb = nil
         AuraState.currentAura = nil
         
-        -- 清理已采集的草药记录
-        HerbState.collectedHerbs = {}
-        
-        print("[主流程] 重新扫描草药列表...")
+        -- 清理已采集的草药记录（保留近期的）
+        local tempCollected = {}
+        local cleanupTime = currentTime - 600  -- 保留10分钟内的记录
+        for herb, collectedTime in pairs(HerbState.collectedHerbs) do
+            if collectedTime > cleanupTime then
+                tempCollected[herb] = collectedTime
+            end
+        end
+        HerbState.collectedHerbs = tempCollected
         
         -- 寻找目标
         local success, bestTarget, isAura = pcall(function()
@@ -2438,26 +2723,40 @@ local function mainLoop()
         end)
         
         if not success then
-            print("[主流程] 寻找目标时发生错误，5秒后重试")
+            print("[主流程] 寻找目标时发生错误，2秒后重试")
             warn("[主流程] 错误详情: " .. tostring(bestTarget))
             
+            consecutiveFails = consecutiveFails + 1
+            if consecutiveFails >= maxConsecutiveFails then
+                print("[主流程] 连续失败次数过多，执行强制清理")
+                enhancedCleanup()
+                consecutiveFails = 0
+            end
+            
             disableFlight()
-            task.wait(5)
+            task.wait(2)
             continue
         end
         
         if not bestTarget then
-            print("[主流程] 未找到任何目标，5秒后重试")
+            print("[主流程] 未找到任何目标，2秒后重试")
             disableFlight()
             
-            for i = 1, 50 do
-                if not HerbState.isRunning then
-                    break
-                end
-                task.wait(0.1)
+            consecutiveFails = consecutiveFails + 1
+            if consecutiveFails >= maxConsecutiveFails then
+                print("[主流程] 连续失败次数过多，执行深度扫描")
+                -- 执行深度清理和重新扫描
+                enhancedCleanup()
+                resetScanState()
+                consecutiveFails = 0
             end
+            
+            task.wait(2)
             continue
         end
+        
+        -- 重置连续失败计数器
+        consecutiveFails = 0
         
         if not HerbState.isRunning then
             break
@@ -2476,9 +2775,13 @@ local function mainLoop()
         enableFlight()
         
         -- 等待飞行完全启用
-        for i = 1, 10 do
+        local flightReady = false
+        for i = 1, 20 do
             if not HerbState.isRunning then break end
-            if HerbState.IsFlying and HerbState.FlightBodyVelocity then break end
+            if HerbState.IsFlying and HerbState.FlightBodyVelocity then 
+                flightReady = true
+                break 
+            end
             task.wait(0.1)
         end
         
@@ -2486,16 +2789,16 @@ local function mainLoop()
             break
         end
         
-        if not HerbState.IsFlying then
+        if not flightReady then
             print("[主流程] 飞行模式未能启用，重新尝试")
             enableFlight()
             task.wait(1)
-        end
-        
-        if not HerbState.IsFlying then
-            print("[主流程] 飞行模式仍然未启用，跳过当前目标")
-            task.wait(2)
-            continue
+            
+            if not HerbState.IsFlying then
+                print("[主流程] 飞行模式仍然未启用，跳过当前目标")
+                task.wait(2)
+                continue
+            end
         end
         
         -- 飞行到目标
@@ -2525,7 +2828,7 @@ local function mainLoop()
                     if HerbState.isRunning then
                         ascendToFlyHeight()
                     end
-                    task.wait(2)
+                    task.wait(1)
                     continue
                 end
                 bestTarget = alternativeTarget
@@ -2591,6 +2894,11 @@ local function mainLoop()
             print("[主流程] 目标采集成功，准备下一个")
             if HerbState.isRunning then
                 ascendToFlyHeight()
+            end
+            
+            -- 记录采集时间（用于清理）
+            if bestTarget then
+                HerbState.collectedHerbs[bestTarget] = tick()
             end
             
             HerbState.currentHerb = nil
@@ -2660,10 +2968,12 @@ local function startHerbSystem()
     HerbState.collectedHerbs = {}
     HerbState.timeoutHerbs = {}
     HerbState.herbAgeCache = {}
+    HerbState.modifiedHerbs = {}
     HerbState.failCount = 0
     HerbState.currentHerb = nil
     AuraState.currentAura = nil
     HerbState.IsFlying = false
+    HerbState.lastTargetTime = tick()  -- 添加记录
     
     if HerbState.FlightBodyVelocity then
         HerbState.FlightBodyVelocity:Destroy()
@@ -4781,12 +5091,14 @@ task.spawn(function()
         
         -- 检查草药系统状态
         if HerbState.isRunning then
-            -- 清理过期的缓存
+            -- 检查是否有长时间没有进展
             local currentTime = tick()
-            for herb, cacheTime in pairs(HerbState.herbAgeCache) do
-                if currentTime - cacheTime > 600 then -- 10分钟前的缓存
-                    HerbState.herbAgeCache[herb] = nil
-                end
+            local lastTargetTime = HerbState.lastTargetTime or 0
+            
+            if currentTime - lastTargetTime > 180 then  -- 3分钟没有新目标
+                print("[系统检查] 长时间没有找到新目标，执行深度清理")
+                enhancedCleanup()
+                HerbState.lastTargetTime = currentTime
             end
         end
     end
@@ -5121,27 +5433,8 @@ task.spawn(function()
         if HerbState.isRunning then
             print("[定期清理] 执行定期状态清理...")
             
-            -- 清理过期的缓存
-            local currentTime = tick()
-            for herb, cacheTime in pairs(HerbState.herbAgeCache) do
-                if currentTime - cacheTime > 600 then -- 10分钟前的缓存
-                    HerbState.herbAgeCache[herb] = nil
-                end
-            end
-            
-            -- 清理过期的超时记录
-            for herb, timeoutTime in pairs(HerbState.timeoutHerbs) do
-                if currentTime - timeoutTime > CONFIG.TIMEOUT_COOLDOWN then
-                    HerbState.timeoutHerbs[herb] = nil
-                end
-            end
-            
-            -- 清理过期的修改记录
-            for herb, _ in pairs(HerbState.modifiedHerbs) do
-                if not herb or not herb.Parent then
-                    HerbState.modifiedHerbs[herb] = nil
-                end
-            end
+            -- 执行增强清理
+            enhancedCleanup()
             
             -- 如果当前目标为空或无效，强制重新寻找
             if HerbState.currentHerb and (not HerbState.currentHerb.Parent or not HerbState.currentHerb:IsDescendantOf(Workspace)) then
