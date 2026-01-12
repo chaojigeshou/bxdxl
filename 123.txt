@@ -1774,6 +1774,18 @@ local function filterHerbsByPriority(herbs)
     return formattedPriorityHerbs, nonPriorityHerbs, true
 end
 
+-- ===================== 重置扫描状态函数（移到findBestTarget之前） =====================
+local function resetScanState()
+    print("[重置] 正在重置扫描状态...")
+    
+    HerbState.collectedHerbs = {}
+    HerbState.timeoutHerbs = {}
+    HerbState.herbAgeCache = {}
+    HerbState.modifiedHerbs = {}  -- 也重置修改记录
+    
+    print("[重置] 扫描状态已重置")
+end
+
 -- ===================== 修复：优化寻找最佳目标的逻辑 =====================
 local function findBestTarget()
     -- 先检查当前目标是否仍然有效
@@ -1834,7 +1846,7 @@ local function findBestTarget()
     -- 如果超过30秒没找到目标，重置状态
     if timeSinceLastTarget > 30 then
         print("[寻找] 长时间未找到目标，重置扫描状态")
-        resetScanState()
+        resetScanState()  -- 现在这个函数已经被定义，可以直接调用
         HerbState.lastTargetTime = currentTime
     end
     
@@ -2477,6 +2489,7 @@ local function waitForPlayerCollect(target, isAura)
     return false
 end
 
+-- ===================== 寻找替代目标函数 =====================
 local function findAlternativeTarget(excludeTarget, excludeIsAura)
     print("[寻找] 正在寻找替代目标...")
     
@@ -2621,17 +2634,6 @@ local function findAlternativeTarget(excludeTarget, excludeIsAura)
     
     print("[寻找] 没有其他可用的替代目标")
     return nil, false
-end
-
-local function resetScanState()
-    print("[重置] 正在重置扫描状态...")
-    
-    HerbState.collectedHerbs = {}
-    HerbState.timeoutHerbs = {}
-    HerbState.herbAgeCache = {}
-    HerbState.modifiedHerbs = {}  -- 也重置修改记录
-    
-    print("[重置] 扫描状态已重置")
 end
 
 -- ===================== 修复：主循环中的改进 =====================
