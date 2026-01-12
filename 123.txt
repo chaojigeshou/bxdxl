@@ -101,7 +101,8 @@ local HerbState = {
     collectAuras = true,  -- 是否采集功法
     targetMode = "both",   -- 目标模式: both, herb, aura
     quickPickEnabled = false,  -- 一键加速开关
-    autoHarvestEnabled = false,  -- 自动采摘开关
+    autoHarvestEnabled = false,  -- 自动采摘开关（用户设置的复选框状态）
+    autoHarvestActive = false,  -- 自动采摘是否正在运行（运行时状态）
     autoHarvestConnection = nil,  -- 自动采摘连接器
     autoHarvestLastCollectTime = 0,  -- 上次采摘时间
     autoHarvestCollectInterval = 0.1,  -- 采集间隔（秒）
@@ -930,7 +931,7 @@ end
 -- ===================== 修复的自动采摘功能 =====================
 -- ===================== 自动采摘核心函数 =====================
 local function autoHarvestNearestHerb()
-    if not HerbState.autoHarvestEnabled then return end
+    if not HerbState.autoHarvestActive then return end
     
     local character = player.Character
     if not character then return end
@@ -1033,13 +1034,13 @@ local function startAutoHarvest()
         stopAutoHarvest()
     end
     
-    HerbState.autoHarvestEnabled = true
+    HerbState.autoHarvestActive = true
     print(string.format("[自动采摘] 开启自动采摘 (%.1f秒间隔, 距离: %d米)", 
         HerbState.autoHarvestCollectInterval, HerbState.autoHarvestMaxDistance))
     
     -- 创建一个新的连接器
     HerbState.autoHarvestConnection = RunService.Heartbeat:Connect(function()
-        if HerbState.autoHarvestEnabled then
+        if HerbState.autoHarvestActive then
             autoHarvestNearestHerb()
             task.wait(HerbState.autoHarvestCollectInterval)
         end
@@ -1047,8 +1048,8 @@ local function startAutoHarvest()
 end
 
 local function stopAutoHarvest()
-    HerbState.autoHarvestEnabled = false
-    print("[自动采摘] 关闭自动采摘")
+    HerbState.autoHarvestActive = false
+    print("[自动采摘] 停止自动采摘功能")
     
     if HerbState.autoHarvestConnection then
         HerbState.autoHarvestConnection:Disconnect()
@@ -1491,7 +1492,7 @@ local function scanHerbs()
         warn("[扫描] 未找到草药文件夹：" .. CONFIG.HERBS_FOLDER_NAME)
         
         -- 尝试查找其他可能的草药文件夹
-        local alternativeFolders = {"Herb", "Herbs", "草药", "草药采集", "植物", "Plants"}
+        local alternativeFolders = {"Herb", "Herbs", "草药", "草药采集", "植物", "Plants", "Farm"}
         for _, folderName in ipairs(alternativeFolders) do
             local folder = Workspace:FindFirstChild(folderName)
             if folder and (folder:IsA("Folder") or folder:IsA("Model")) then
@@ -1506,13 +1507,15 @@ local function scanHerbs()
             
             -- 遍历Workspace直接查找草药对象
             local allHerbs = {}
+            local currentTime = tick()
+            
             for _, child in ipairs(Workspace:GetChildren()) do
                 if child and child.Parent then
                     -- 检查是否是草药对象（根据常见特征）
                     local isHerb = false
                     
                     -- 检查名称中是否包含草药关键词
-                    local herbKeywords = {"Herb", "Growth", "Plant", "草药", "草", "药"}
+                    local herbKeywords = {"Herb", "Growth", "Plant", "草药", "草", "药", "Farm"}
                     for _, keyword in ipairs(herbKeywords) do
                         if child.Name:find(keyword) then
                             isHerb = true
@@ -1547,7 +1550,22 @@ local function scanHerbs()
                         end
                         
                         if not isBlacklisted then
-                            table.insert(allHerbs, child)
+                            -- 检查是否在超时列表中（使用更宽松的检查）
+                            local isTimedOut = false
+                            for timeoutHerb, timeoutTime in pairs(HerbState.timeoutHerbs) do
+                                if timeoutHerb and timeoutHerb.Parent and timeoutHerb.Name == child.Name then
+                                    -- 检查超时冷却是否已过
+                                    if currentTime - timeoutTime < CONFIG.TIMEOUT_COOLDOWN then
+                                        isTimedOut = true
+                                        break
+                                    end
+                                end
+                            end
+                            
+                            if not isTimedOut then
+                                table.insert(allHerbs, child)
+                                print("[扫描] 通过遍历找到草药: " .. child.Name)
+                            end
                         end
                     end
                 end
@@ -1560,10 +1578,9 @@ local function scanHerbs()
 
     local validHerbs = {}
     local currentTime = tick()
-    
-    -- 扫描所有草药对象
     local scanCount = 0
     local skipCount = 0
+    local foundCount = 0
     
     -- 递归扫描子对象
     local function scanFolderContents(folder)
@@ -1591,10 +1608,14 @@ local function scanHerbs()
             -- 检查是否已采集（使用更宽松的检查）
             local isCollected = false
             for collectedHerb, collectedTime in pairs(HerbState.collectedHerbs) do
-                if collectedHerb and collectedHerb == item and (currentTime - collectedTime) < 600 then
-                    isCollected = true
-                    skipCount = skipCount + 1
-                    break
+                -- 检查是否是同一个草药（通过名称和位置）
+                if collectedHerb and item.Parent then
+                    -- 如果是同一个对象，或者名称相同且在相同位置附近
+                    if collectedHerb == item then
+                        if (currentTime - collectedTime) < 300 then -- 5分钟内不重复采集同一个对象
+                            isCollected = true
+                        end
+                    end
                 end
             end
             
@@ -1608,6 +1629,7 @@ local function scanHerbs()
                 end
             end
             
+            -- 检查是否是当前目标
             local isCurrentTarget = (HerbState.currentHerb and HerbState.currentHerb == item)
             
             -- 扩展支持的对象类型
@@ -1647,6 +1669,7 @@ local function scanHerbs()
             
             if isValidType and not isCollected and not isTimedOut and (not isCurrentTarget or not item.Parent) then
                 table.insert(validHerbs, item)
+                foundCount = foundCount + 1
                 
                 -- 如果开启了一键加速，修改采摘时间
                 if HerbState.quickPickEnabled then
@@ -1668,21 +1691,54 @@ local function scanHerbs()
     -- 打印扫描统计信息
     if scanCount > 0 then
         print(string.format("[扫描] 统计: 扫描 %d 个对象，有效草药 %d 个，跳过 %d 个", 
-            scanCount, #validHerbs, skipCount))
+            scanCount, foundCount, skipCount))
         
-        -- 如果跳过太多，考虑重置状态
-        if skipCount > 50 and #validHerbs == 0 then
-            print("[扫描] 警告：跳过太多对象且没有有效草药，考虑重置状态")
-            task.spawn(function()
-                resetScanState()
-                print("[扫描] 已执行重置扫描状态")
-            end)
+        -- 如果跳过太多且找到太少，尝试深度搜索
+        if skipCount > 50 and foundCount < 3 then
+            print("[扫描] 警告：跳过太多对象且有效草药很少，执行深度搜索")
+            
+            -- 再次遍历，这次不过滤太多
+            validHerbs = {}
+            foundCount = 0
+            
+            local function deepScan(folder)
+                for _, item in ipairs(folder:GetChildren()) do
+                    if item and item.Parent then
+                        -- 只检查基本类型和黑名单
+                        local isValid = item:IsA("MeshPart") or item:IsA("Part") or item:IsA("Model") 
+                                      or item:IsA("UnionOperation") or item:IsA("WedgePart")
+                        
+                        if isValid then
+                            local isBlacklisted = false
+                            for _, blacklistName in ipairs(CONFIG.BLACKLIST_HERBS) do
+                                if item.Name == blacklistName or item.Name:match(blacklistName) then
+                                    isBlacklisted = true
+                                    break
+                                end
+                            end
+                            
+                            if not isBlacklisted then
+                                table.insert(validHerbs, item)
+                                foundCount = foundCount + 1
+                            end
+                        end
+                        
+                        if item:IsA("Folder") or item:IsA("Model") then
+                            deepScan(item)
+                        end
+                    end
+                end
+            end
+            
+            deepScan(herbsFolder)
+            print(string.format("[扫描] 深度搜索: 找到 %d 个草药", foundCount))
         end
     else
         print("[扫描] 警告：没有扫描到任何对象")
     end
     
-    return validHerbs
+    -- 确保至少返回一个空表
+    return validHerbs or {}
 end
 
 local function filterHerbsByPriority(herbs)
@@ -1729,6 +1785,7 @@ local function findBestTarget()
         for collectedHerb, collectedTime in pairs(HerbState.collectedHerbs) do
             if collectedHerb == HerbState.currentHerb then
                 isStillValid = false
+                print("[寻找] 当前目标已采集: " .. HerbState.currentHerb.Name)
                 break
             end
         end
@@ -1737,6 +1794,7 @@ local function findBestTarget()
         for timeoutHerb, timeoutTime in pairs(HerbState.timeoutHerbs) do
             if timeoutHerb == HerbState.currentHerb and (tick() - timeoutTime) < CONFIG.TIMEOUT_COOLDOWN then
                 isStillValid = false
+                print("[寻找] 当前目标超时: " .. HerbState.currentHerb.Name)
                 break
             end
         end
@@ -1769,6 +1827,17 @@ local function findBestTarget()
         end
     end
     
+    -- 记录上次找到目标的时间
+    local currentTime = tick()
+    local timeSinceLastTarget = currentTime - HerbState.lastTargetTime
+    
+    -- 如果超过30秒没找到目标，重置状态
+    if timeSinceLastTarget > 30 then
+        print("[寻找] 长时间未找到目标，重置扫描状态")
+        resetScanState()
+        HerbState.lastTargetTime = currentTime
+    end
+    
     -- 根据目标模式决定寻找目标
     if HerbState.targetMode == "aura" or HerbState.targetMode == "both" then
         -- 优先查找功法
@@ -1798,6 +1867,7 @@ local function findBestTarget()
             if closestAura then
                 AuraState.currentAura = closestAura
                 HerbState.currentHerb = nil
+                HerbState.lastTargetTime = currentTime
                 print(string.format("[寻找] 选择功法: %s (距离: %.1f米)", closestAura.Name, closestDistance))
                 return closestAura, true
             else
@@ -1811,15 +1881,30 @@ local function findBestTarget()
     -- 如果没有功法或者目标模式不是功法优先，则查找草药
     if HerbState.targetMode == "herb" or HerbState.targetMode == "both" then
         AuraState.currentAura = nil
-        local allHerbs = scanHerbs()
+        
+        -- 尝试多次扫描，确保找到草药
+        local allHerbs = {}
+        local maxAttempts = 3
+        
+        for attempt = 1, maxAttempts do
+            allHerbs = scanHerbs()
+            if #allHerbs > 0 then
+                break
+            end
+            
+            if attempt < maxAttempts then
+                print(string.format("[寻找] 第%d次扫描未找到草药，等待1秒后重试", attempt))
+                task.wait(1)
+            end
+        end
         
         if #allHerbs == 0 then 
-            print("[寻找] 未找到任何有效草药")
+            print("[寻找] 多次扫描后仍未找到任何有效草药")
             HerbState.failCount = HerbState.failCount + 1
             
             -- 增加失败时的调试信息
             if HerbState.failCount >= 3 then
-                print("[寻找] 连续3次未找到目标，执行深度清理")
+                print("[寻找] 连续3次未找到目标，执行深度清理和重置")
                 
                 -- 执行更彻底的清理
                 HerbState.collectedHerbs = {}
@@ -1830,28 +1915,40 @@ local function findBestTarget()
                 
                 -- 等待一会后重新扫描
                 task.wait(2)
+                
+                -- 强制重新扫描一次
                 allHerbs = scanHerbs()
                 
                 if #allHerbs == 0 then
-                    print("[寻找] 深度清理后仍未找到目标，检查游戏状态")
+                    print("[寻找] 深度清理后仍未找到目标")
                     
                     -- 检查游戏服务状态
                     local herbsFolder = Workspace:FindFirstChild(CONFIG.HERBS_FOLDER_NAME)
                     if not herbsFolder then
-                        print("[寻找] 错误：草药文件夹不存在，可能游戏状态异常")
+                        print("[寻找] 错误：草药文件夹不存在")
+                        
+                        -- 尝试查找所有可能的文件夹
+                        for _, folderName in ipairs({"Herb", "Herbs", "草药", "草药采集", "植物", "Plants", "Farm"}) do
+                            local folder = Workspace:FindFirstChild(folderName)
+                            if folder then
+                                print("[寻找] 找到可能的草药文件夹: " .. folderName)
+                                break
+                            end
+                        end
                     else
                         print(string.format("[寻找] 草药文件夹存在，子对象数量: %d", #herbsFolder:GetChildren()))
+                        
+                        -- 列出所有子对象
+                        for _, child in ipairs(herbsFolder:GetChildren()) do
+                            print("[寻找] 文件夹内容: " .. child.Name .. " (" .. child.ClassName .. ")")
+                        end
                     end
                     
-                    -- 尝试更宽松的扫描
-                    print("[寻找] 尝试放宽扫描条件...")
-                    allHerbs = scanHerbs()
+                    return nil, false
                 end
             end
             
-            if #allHerbs == 0 then
-                return nil, false
-            end
+            return nil, false
         else
             HerbState.failCount = 0
         end
@@ -1896,6 +1993,7 @@ local function findBestTarget()
                 local bestAge = allPriorityHerbs[1].age
                 local bestDistance = allPriorityHerbs[1].distance
                 
+                HerbState.lastTargetTime = currentTime
                 print(string.format("[优先级] 选择年份最大草药: %s (年份: %d, 距离: %.1f米)", 
                     bestHerb.Name, bestAge, bestDistance))
                 
@@ -1946,6 +2044,7 @@ local function findBestTarget()
             local bestAge = herbInfoList[1].age
             local bestDistance = herbInfoList[1].distance
             
+            HerbState.lastTargetTime = currentTime
             print(string.format("[寻找] 选择年份最大草药: %s (年份: %d, 距离: %.1f米)", 
                 bestHerb.Name, bestAge, bestDistance))
             
@@ -2582,20 +2681,21 @@ local function mainLoop()
             print("[主流程] 寻找目标时发生错误，2秒后重试")
             warn("[主流程] 错误详情: " .. tostring(bestTarget))
             
-            disableFlight()
+            StopAllMovement()  -- 修复这里：使用StopAllMovement而不是disableFlight
             task.wait(2)
             continue
         end
         
         if not bestTarget then
             print("[主流程] 未找到任何目标，2秒后重试")
-            disableFlight()
+            StopAllMovement()  -- 修复这里：使用StopAllMovement而不是disableFlight
             
             task.wait(2)
             continue
         end
         
         if not HerbState.isRunning then
+            StopAllMovement()  -- 修复这里：使用StopAllMovement而不是disableFlight
             break
         end
         
@@ -2623,6 +2723,7 @@ local function mainLoop()
         end
         
         if not HerbState.isRunning then
+            StopAllMovement()  -- 修复这里：使用StopAllMovement而不是disableFlight
             break
         end
         
@@ -2643,7 +2744,7 @@ local function mainLoop()
         local reachSuccess = flyToTarget(bestTarget, isAura)
         
         if not HerbState.isRunning then
-            disableFlight()
+            StopAllMovement()  -- 修复这里：使用StopAllMovement而不是disableFlight
             break
         end
         
@@ -2683,7 +2784,7 @@ local function mainLoop()
         print("[主流程] 飞行到达成功，准备下降...")
         
         if not HerbState.isRunning then
-            disableFlight()
+            StopAllMovement()  -- 修复这里：使用StopAllMovement而不是disableFlight
             break
         end
         
@@ -2720,7 +2821,7 @@ local function mainLoop()
         end
 
         if not HerbState.isRunning then
-            disableFlight()
+            StopAllMovement()  -- 修复这里：使用StopAllMovement而不是disableFlight
             break
         end
         
@@ -2783,7 +2884,7 @@ local function mainLoop()
         end
     end
 
-    disableFlight()
+    StopAllMovement()  -- 修复这里：使用StopAllMovement而不是disableFlight
     HerbState.currentHerb = nil
     AuraState.currentAura = nil
     HerbState.retryAttempts = 0
@@ -2846,6 +2947,7 @@ local function startHerbSystem()
     -- 启动自动采摘（根据复选框状态）
     if HerbState.autoHarvestEnabled then
         print("[系统] 启用自动采摘")
+        HerbState.autoHarvestActive = true
         startAutoHarvest()
     end
     
@@ -2886,7 +2988,7 @@ local function stopHerbSystem()
     HerbState.currentHerb = nil
     AuraState.currentAura = nil
     
-    -- 停止自动采摘
+    -- 停止自动采摘（只停止功能，不改变复选框状态）
     stopAutoHarvest()
     
     -- 停止功法自动收集
@@ -4523,70 +4625,70 @@ local function createMainUI()
     end)
     
     -- 复选框事件
-collisionCheckbox.MouseButton1Click:Connect(function()
-    HerbState.collisionEnabled = not HerbState.collisionEnabled
-    collisionCheckmark.Text = HerbState.collisionEnabled and "✓" or ""
-    
-    -- 如果系统正在运行，立即应用更改
-    if HerbState.isRunning then
-        if HerbState.collisionEnabled then
-            disableAllCollisionInMap()
-        else
-            enableAllCollisionInMap()
-        end
-    end
-    
-    print("[系统] " .. (HerbState.collisionEnabled and "启用" or "禁用") .. "碰撞禁用功能")
-end)
-    
-quickPickCheckbox.MouseButton1Click:Connect(function()
-    HerbState.quickPickEnabled = not HerbState.quickPickEnabled
-    quickPickCheckmark.Text = HerbState.quickPickEnabled and "✓" or ""
-    
-    -- 如果系统正在运行，立即应用更改
-    if HerbState.isRunning and HerbState.quickPickEnabled then
-        setupQuickPickListener()
-    end
-    
-    print("[系统] " .. (HerbState.quickPickEnabled and "启用" or "禁用") .. "一键加速功能")
-end)
-    
-autoHarvestCheckbox.MouseButton1Click:Connect(function()
-    HerbState.autoHarvestEnabled = not HerbState.autoHarvestEnabled
-    autoHarvestCheckmark.Text = HerbState.autoHarvestEnabled and "✓" or ""
-    
-    -- 如果系统正在运行，立即应用更改
-    if HerbState.isRunning then
-        if HerbState.autoHarvestEnabled then
-            print("[自动采摘] 手动启动自动采摘")
-            startAutoHarvest()
-        else
-            print("[自动采摘] 手动停止自动采摘")
-            stopAutoHarvest()
-        end
-    end
-    
-    print("[系统] " .. (HerbState.autoHarvestEnabled and "启用" or "禁用") .. "自动采摘功能")
-end)
-
-    
-auraAutoCollectCheckbox.MouseButton1Click:Connect(function()
-    HerbState.auraAutoCollectEnabled = not HerbState.auraAutoCollectEnabled
-    auraAutoCollectCheckmark.Text = HerbState.auraAutoCollectEnabled and "✓" or ""
-    
-    -- 如果系统正在运行，立即应用更改
-    if HerbState.isRunning then
-        if HerbState.auraAutoCollectEnabled then
-            toggleAuraAutoCollect()  -- 这会启动功法收集
-        else
-            if AuraAutoCollectState.enabled then
-                toggleAuraAutoCollect()  -- 这会停止功法收集
+    collisionCheckbox.MouseButton1Click:Connect(function()
+        HerbState.collisionEnabled = not HerbState.collisionEnabled
+        collisionCheckmark.Text = HerbState.collisionEnabled and "✓" or ""
+        
+        -- 如果系统正在运行，立即应用更改
+        if HerbState.isRunning then
+            if HerbState.collisionEnabled then
+                disableAllCollisionInMap()
+            else
+                enableAllCollisionInMap()
             end
         end
-    end
+        
+        print("[系统] " .. (HerbState.collisionEnabled and "启用" or "禁用") .. "碰撞禁用功能")
+    end)
     
-    print("[系统] " .. (HerbState.auraAutoCollectEnabled and "启用" or "禁用") .. "功法自动收集功能")
-end)
+    quickPickCheckbox.MouseButton1Click:Connect(function()
+        HerbState.quickPickEnabled = not HerbState.quickPickEnabled
+        quickPickCheckmark.Text = HerbState.quickPickEnabled and "✓" or ""
+        
+        -- 如果系统正在运行，立即应用更改
+        if HerbState.isRunning and HerbState.quickPickEnabled then
+            setupQuickPickListener()
+        end
+        
+        print("[系统] " .. (HerbState.quickPickEnabled and "启用" or "禁用") .. "一键加速功能")
+    end)
+    
+    autoHarvestCheckbox.MouseButton1Click:Connect(function()
+        HerbState.autoHarvestEnabled = not HerbState.autoHarvestEnabled
+        autoHarvestCheckmark.Text = HerbState.autoHarvestEnabled and "✓" or ""
+        
+        -- 如果系统正在运行，立即应用更改
+        if HerbState.isRunning then
+            if HerbState.autoHarvestEnabled then
+                print("[自动采摘] 手动启动自动采摘")
+                HerbState.autoHarvestActive = true
+                startAutoHarvest()
+            else
+                print("[自动采摘] 手动停止自动采摘")
+                stopAutoHarvest()
+            end
+        end
+        
+        print("[系统] " .. (HerbState.autoHarvestEnabled and "启用" or "禁用") .. "自动采摘功能")
+    end)
+    
+    auraAutoCollectCheckbox.MouseButton1Click:Connect(function()
+        HerbState.auraAutoCollectEnabled = not HerbState.auraAutoCollectEnabled
+        auraAutoCollectCheckmark.Text = HerbState.auraAutoCollectEnabled and "✓" or ""
+        
+        -- 如果系统正在运行，立即应用更改
+        if HerbState.isRunning then
+            if HerbState.auraAutoCollectEnabled then
+                toggleAuraAutoCollect()  -- 这会启动功法收集
+            else
+                if AuraAutoCollectState.enabled then
+                    toggleAuraAutoCollect()  -- 这会停止功法收集
+                end
+            end
+        end
+        
+        print("[系统] " .. (HerbState.auraAutoCollectEnabled and "启用" or "禁用") .. "功法自动收集功能")
+    end)
     
     -- 草药按钮事件
     herbPriorityButton.MouseButton1Click:Connect(function()
@@ -4594,23 +4696,23 @@ end)
         createPrioritySelectionUI()
     end)
     
-herbToggleButton.MouseButton1Click:Connect(function()
-    if HerbState.isPriorityUIOpen then
-        print("[UI] 请先关闭优先级选择界面")
-        return
-    end
-    
-    if HerbState.isRunning then
-        stopHerbSystem()
-        herbToggleButton.Text = "启动系统"
-        herbToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
-    else
-        if startHerbSystem() then
-            herbToggleButton.Text = "停止系统"
-            herbToggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    herbToggleButton.MouseButton1Click:Connect(function()
+        if HerbState.isPriorityUIOpen then
+            print("[UI] 请先关闭优先级选择界面")
+            return
         end
-    end
-end)
+        
+        if HerbState.isRunning then
+            stopHerbSystem()
+            herbToggleButton.Text = "启动系统"
+            herbToggleButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+        else
+            if startHerbSystem() then
+                herbToggleButton.Text = "停止系统"
+                herbToggleButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+            end
+        end
+    end)
     
     -- 功法按钮事件
     auraModeButton.MouseButton1Click:Connect(function()
@@ -4979,6 +5081,7 @@ print("=== 系统初始化完成 ===")
 -- ===================== 修复角色重生处理 =====================
 local wasHerbRunningBeforeDeath = false
 local wasCollisionDisabled = false
+local wasAutoHarvestEnabled = false  -- 新增：记录自动采摘复选框状态
 local currentTargetMode = "both" -- 保存当前目标模式
 
 player.CharacterRemoving:Connect(function()
@@ -4987,11 +5090,13 @@ player.CharacterRemoving:Connect(function()
     -- 记录所有系统状态
     wasHerbRunningBeforeDeath = HerbState.isRunning
     wasCollisionDisabled = CollisionState.isCollisionDisabled
+    wasAutoHarvestEnabled = HerbState.autoHarvestEnabled  -- 记录自动采摘复选框状态
     currentTargetMode = HerbState.targetMode
     
     print("[重生] 状态记录完成:")
     print("- 草药系统: " .. tostring(wasHerbRunningBeforeDeath))
     print("- 碰撞禁用: " .. tostring(wasCollisionDisabled))
+    print("- 自动采摘复选框: " .. tostring(wasAutoHarvestEnabled))
     print("- 目标模式: " .. currentTargetMode)
     
     print("[重生] 防AFK系统继续运行，不停止")
@@ -5005,7 +5110,7 @@ player.CharacterAdded:Connect(function(newChar)
     humanoid = newChar:WaitForChild("Humanoid")
     humanoidRootPart = newChar:WaitForChild("HumanoidRootPart")
     
-    -- 停止所有系统
+    -- 停止所有系统（不重置复选框状态）
     stopHerbSystem()
     HerbState.currentHerb = nil
     AuraState.currentAura = nil
@@ -5080,7 +5185,10 @@ player.CharacterAdded:Connect(function(newChar)
     -- 恢复目标模式
     HerbState.targetMode = currentTargetMode
     
-    -- 恢复草药系统
+    -- 恢复自动采摘复选框状态（不自动启动功能）
+    HerbState.autoHarvestEnabled = wasAutoHarvestEnabled
+    
+    -- 恢复草药系统（如果之前是运行状态）
     if wasHerbRunningBeforeDeath and not HerbState.isRunning then
         print("[重生] 恢复草药采集系统")
         startHerbSystem()
