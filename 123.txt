@@ -22,7 +22,7 @@ local CraftPillEvent = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("C
 -- 核心配置
 local CONFIG = {
     -- 草药采摘配置
-    FLY_HEIGHT = 750,
+    FLY_HEIGHT = 650,
     NORMAL_HEIGHT_OFFSET = 5,
     FLY_SPEED = 120,
     MOVE_TIMEOUT = 35,
@@ -5237,3 +5237,4 @@ player.CharacterAdded:Connect(function()
 end)
 
 print("=== 系统初始化完成 ===")
+
